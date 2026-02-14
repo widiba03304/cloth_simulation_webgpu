@@ -246,7 +246,7 @@ export function createControlsPanel(callbacks: UICallbacks): HTMLElement {
   cubemapSelect.id = 'cubemap-select';
   cubemapSelect.setAttribute('aria-label', 'Environment Cubemap');
 
-  // List of available cubemaps (user can add more by placing folders in assets/samples/cubemaps/)
+  // List of available cubemaps (user can add more by placing folders in src/renderer/assets/samples/cubemaps/)
   const cubemaps = ['studio_1', 'indoor_1', 'indoor_2'];
   cubemaps.forEach((name) => {
     const opt = document.createElement('option');

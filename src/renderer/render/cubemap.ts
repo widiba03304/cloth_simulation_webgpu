@@ -5,12 +5,15 @@
 
 const FACE_NAMES = ['px', 'nx', 'py', 'ny', 'pz', 'nz'] as const;
 
+/** Base URL for cubemaps (src/renderer/assets/samples/cubemaps). Single source for all cubemap assets. */
+export const CUBEMAP_BASE_URL = '/assets/samples/cubemaps';
+
 export interface CubemapResource {
   texture: GPUTexture;
   view: GPUTextureView;
 }
 
-/** Default cubemap: assets/samples/cubemaps/studio_1 (imported so it is bundled) */
+/** Default cubemap: src/renderer/assets/samples/cubemaps/studio_1 (imported so it is bundled) */
 import defaultPx from '../assets/samples/cubemaps/studio_1/px.png';
 import defaultNx from '../assets/samples/cubemaps/studio_1/nx.png';
 import defaultPy from '../assets/samples/cubemaps/studio_1/py.png';

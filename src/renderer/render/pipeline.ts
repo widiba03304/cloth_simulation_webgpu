@@ -10,7 +10,7 @@ import bodyFragWgsl from './body.frag.wgsl?raw';
 import skyboxVertWgsl from './skybox.vert.wgsl?raw';
 import skyboxFragWgsl from './skybox.frag.wgsl?raw';
 import { buildMannequinMesh, type BodyMesh } from './bodyMesh';
-import { loadDefaultCubemap, loadCubemap, createFallbackCubemap, type CubemapResource } from './cubemap';
+import { loadDefaultCubemap, loadCubemap, createFallbackCubemap, CUBEMAP_BASE_URL, type CubemapResource } from './cubemap';
 
 const VIEW_PROJ_SIZE = 64; // mat4
 const BODY_COLOR_SIZE = 16; // vec4
@@ -61,7 +61,7 @@ const SKYBOX_INDICES = new Uint32Array([
 /**
  * Create render context. Vertex buffer size = maxVertices * 12 (vec3).
  * bodyMesh: optional SMPL/mannequin mesh; if null/undefined, uses built-in cylinder+sphere.
- * Loads default cubemap from assets/samples/cubemaps/studio_1.
+ * Loads default cubemap from src/renderer/assets/samples/cubemaps/studio_1.
  */
 export async function createRenderPipeline(
   device: GPUDevice,
@@ -708,7 +708,7 @@ export async function updateCubemap(
   ctx: RenderContext,
   cubemapName: string
 ): Promise<void> {
-  const basePath = `/assets/samples/cubemaps/${cubemapName}`;
+  const basePath = `${CUBEMAP_BASE_URL}/${cubemapName}`;
   let newCubemap: CubemapResource;
 
   try {
