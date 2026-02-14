@@ -32,9 +32,17 @@ npm install
 
 - **Lint**: `npm run lint` (ESLint).
 
+## Assets not in the repo (add locally)
+
+To keep the repo small, these are not committed; add or generate them locally:
+
+- **SMPL**: `smpl/models/*.pkl`, `src/renderer/assets/samples/avatars/smpl_*_pose.json`, `smpl_*_shapedirs.json` — generate with scripts in `smpl/`.
+
+Cubemap images in `src/renderer/assets/samples/cubemaps/` are tracked in git; see that folder’s README for the expected layout.
+
 ## SMPL mannequin (optional)
 
-Large SMPL assets (pose JSON, shapedirs JSON, `.pkl` models) are not in the repo; generate them locally if needed. To use an SMPL body model as the mannequin, export a neutral-pose OBJ into `src/renderer/assets/samples/avatars/mannequin.obj`. From `smpl/smpl_webuser/hello_world/` run:
+To use an SMPL body model as the mannequin, export a neutral-pose OBJ into `src/renderer/assets/samples/avatars/mannequin.obj`. From `smpl/smpl_webuser/hello_world/` run:
 
 ```bash
 python export_neutral_mannequin.py

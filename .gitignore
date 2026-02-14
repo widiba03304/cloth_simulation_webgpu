@@ -41,7 +41,7 @@ coverage/
 # public/*.wasm
 # public/*.js
 
-# Large assets (generate locally; see README)
+# Large assets (add locally; see README)
 smpl/models/*.pkl
 src/renderer/assets/samples/avatars/smpl_*_pose.json
 src/renderer/assets/samples/avatars/smpl_*_shapedirs.json
