@@ -1,0 +1,6 @@
+{
+  "id": "tank",
+  "name": "Tank Top",
+  "grid": { "rows": 20, "cols": 20, "spacing": 1.1 },
+  "pinned": "topRow"
+}

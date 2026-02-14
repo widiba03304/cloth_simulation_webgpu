@@ -1,0 +1,6 @@
+{
+  "id": "silk",
+  "presetKey": "materials.silk",
+  "albedo": [0.98, 0.95, 0.98],
+  "roughness": 0.35
+}

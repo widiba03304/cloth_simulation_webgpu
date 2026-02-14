@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>WebGPU Skinning Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #1e1e1e;
+      color: #d4d4d4;
+    }
+    .test-result {
+      margin: 10px 0;
+      padding: 10px;
+      border-left: 4px solid #4CAF50;
+      background: #2d2d2d;
+    }
+    .test-result.fail {
+      border-left-color: #f44336;
+    }
+    .test-name {
+      font-weight: bold;
+      font-size: 16px;
+    }
+    .test-detail {
+      margin-left: 20px;
+      font-size: 14px;
+      color: #888;
+    }
+    pre {
+      background: #1a1a1a;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+    button {
+      background: #007acc;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 10px 5px;
+    }
+    button:hover {
+      background: #005a9e;
+    }
+    #summary {
+      font-size: 18px;
+      font-weight: bold;
+      margin: 20px 0;
+      padding: 15px;
+      background: #2d2d2d;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>WebGPU Skinning Tests</h1>
+  <p>This page tests GPU skinning directly in the browser with WebGPU.</p>
+
+  <button onclick="runAllTests()">Run All Tests</button>
+  <button onclick="clearResults()">Clear Results</button>
+
+  <div id="summary"></div>
+  <div id="results"></div>
+
+  <script type="module">
+    const results = document.getElementById('results');
+    const summary = document.getElementById('summary');
+    let passCount = 0;
+    let failCount = 0;
+
+    window.clearResults = () => {
+      results.innerHTML = '';
+      summary.innerHTML = '';
+      passCount = 0;
+      failCount = 0;
+    };
+
+    function logTest(name, passed, details) {
+      const div = document.createElement('div');
+      div.className = 'test-result' + (passed ? '' : ' fail');
+
+      const nameDiv = document.createElement('div');
+      nameDiv.className = 'test-name';
+      nameDiv.textContent = (passed ? '✓' : '✗') + ' ' + name;
+      div.appendChild(nameDiv);
+
+      if (details) {
+        const detailDiv = document.createElement('div');
+        detailDiv.className = 'test-detail';
+        detailDiv.innerHTML = details;
+        div.appendChild(detailDiv);
+      }
+
+      results.appendChild(div);
+
+      if (passed) passCount++;
+      else failCount++;
+
+      summary.innerHTML = `Tests: ${passCount} passed, ${failCount} failed`;
+    }
+
+    async function initWebGPU() {
+      if (!navigator.gpu) {
+        throw new Error('WebGPU not supported');
+      }
+
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        throw new Error('No GPU adapter found');
+      }
+
+      const device = await adapter.requestDevice();
+      return device;
+    }
+
+    // Simple skinning shader for testing
+    const testShaderCode = `
+      struct JointTransform {
+        matrix: mat4x4<f32>,
+      }
+
+      @group(0) @binding(0) var<storage, read> restPositions: array<f32>;
+      @group(0) @binding(1) var<storage, read> skinWeights: array<f32>;
+      @group(0) @binding(2) var<storage, read> jointTransforms: array<JointTransform>;
+      @group(0) @binding(3) var<storage, read_write> deformedPositions: array<f32>;
+
+      struct Params {
+        numVertices: u32,
+        numJoints: u32,
+      }
+      @group(0) @binding(4) var<uniform> params: Params;
+
+      @compute @workgroup_size(64)
+      fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+        let vertexIndex = global_id.x;
+        if (vertexIndex >= params.numVertices) {
+          return;
+        }
+
+        let posIdx = vertexIndex * 3u;
+        let restPos = vec3<f32>(
+          restPositions[posIdx],
+          restPositions[posIdx + 1u],
+          restPositions[posIdx + 2u]
+        );
+
+        var finalPos = vec3<f32>(0.0, 0.0, 0.0);
+        let weightIdx = vertexIndex * params.numJoints;
+
+        for (var j = 0u; j < params.numJoints; j = j + 1u) {
+          let weight = skinWeights[weightIdx + j];
+          if (weight < 0.001) {
+            continue;
+          }
+
+          let transform = jointTransforms[j].matrix;
+          let transformedPos = (transform * vec4<f32>(restPos, 1.0)).xyz;
+          finalPos = finalPos + weight * transformedPos;
+        }
+
+        deformedPositions[posIdx] = finalPos.x;
+        deformedPositions[posIdx + 1u] = finalPos.y;
+        deformedPositions[posIdx + 2u] = finalPos.z;
+      }
+    `;
+
+    async function testIdentityTransform(device) {
+      const numVertices = 10;
+      const numJoints = 1;
+
+      // Create test data
+      const positions = new Float32Array(numVertices * 3);
+      for (let i = 0; i < numVertices; i++) {
+        positions[i * 3] = i;
+        positions[i * 3 + 1] = i * 2;
+        positions[i * 3 + 2] = i * 3;
+      }
+
+      const weights = new Float32Array(numVertices * numJoints);
+      weights.fill(1.0); // All weight on joint 0
+
+      const identity = new Float32Array([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+      ]);
+
+      // Create buffers
+      const posBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(posBuffer.getMappedRange()).set(positions);
+      posBuffer.unmap();
+
+      const weightsBuffer = device.createBuffer({
+        size: weights.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(weightsBuffer.getMappedRange()).set(weights);
+      weightsBuffer.unmap();
+
+      const jointsBuffer = device.createBuffer({
+        size: identity.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(jointsBuffer.getMappedRange()).set(identity);
+      jointsBuffer.unmap();
+
+      const outputBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+      });
+
+      const readbackBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+
+      const paramsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint32Array(paramsBuffer.getMappedRange()).set([numVertices, numJoints]);
+      paramsBuffer.unmap();
+
+      // Create pipeline
+      const shaderModule = device.createShaderModule({ code: testShaderCode });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: {
+          module: shaderModule,
+          entryPoint: 'main'
+        }
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: posBuffer } },
+          { binding: 1, resource: { buffer: weightsBuffer } },
+          { binding: 2, resource: { buffer: jointsBuffer } },
+          { binding: 3, resource: { buffer: outputBuffer } },
+          { binding: 4, resource: { buffer: paramsBuffer } }
+        ]
+      });
+
+      // Run compute
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(numVertices / 64));
+      pass.end();
+
+      encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, positions.byteLength);
+      device.queue.submit([encoder.finish()]);
+
+      // Read results
+      await readbackBuffer.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(readbackBuffer.getMappedRange()).slice();
+      readbackBuffer.unmap();
+
+      // Verify
+      let passed = true;
+      let details = '<pre>';
+      for (let i = 0; i < numVertices && i < 5; i++) {
+        const original = [positions[i*3], positions[i*3+1], positions[i*3+2]];
+        const computed = [result[i*3], result[i*3+1], result[i*3+2]];
+
+        details += `Vertex ${i}: [${original.map(v => v.toFixed(2)).join(', ')}] -> [${computed.map(v => v.toFixed(2)).join(', ')}]`;
+
+        for (let j = 0; j < 3; j++) {
+          if (Math.abs(original[j] - computed[j]) > 0.001) {
+            passed = false;
+            details += ' ❌';
+            break;
+          }
+        }
+        details += '\n';
+      }
+      details += '</pre>';
+
+      return { passed, details };
+    }
+
+    async function testRotation(device) {
+      const numVertices = 4;
+      const numJoints = 1;
+
+      // Test vertices
+      const positions = new Float32Array([
+        1, 0, 0,  // +X
+        0, 1, 0,  // +Y
+        0, 0, 1,  // +Z
+        0, 0, 0   // Origin
+      ]);
+
+      const weights = new Float32Array(numVertices * numJoints).fill(1.0);
+
+      // 90-degree rotation around Z axis (column-major)
+      const angle = Math.PI / 2;
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      const rotation = new Float32Array([
+        c, s, 0, 0,
+        -s, c, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+      ]);
+
+      // Create buffers (same as identity test)
+      const posBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(posBuffer.getMappedRange()).set(positions);
+      posBuffer.unmap();
+
+      const weightsBuffer = device.createBuffer({
+        size: weights.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(weightsBuffer.getMappedRange()).set(weights);
+      weightsBuffer.unmap();
+
+      const jointsBuffer = device.createBuffer({
+        size: rotation.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(jointsBuffer.getMappedRange()).set(rotation);
+      jointsBuffer.unmap();
+
+      const outputBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+      });
+
+      const readbackBuffer = device.createBuffer({
+        size: positions.byteLength,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+
+      const paramsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint32Array(paramsBuffer.getMappedRange()).set([numVertices, numJoints]);
+      paramsBuffer.unmap();
+
+      const shaderModule = device.createShaderModule({ code: testShaderCode });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: shaderModule, entryPoint: 'main' }
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: posBuffer } },
+          { binding: 1, resource: { buffer: weightsBuffer } },
+          { binding: 2, resource: { buffer: jointsBuffer } },
+          { binding: 3, resource: { buffer: outputBuffer } },
+          { binding: 4, resource: { buffer: paramsBuffer } }
+        ]
+      });
+
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(numVertices / 64));
+      pass.end();
+
+      encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, positions.byteLength);
+      device.queue.submit([encoder.finish()]);
+
+      await readbackBuffer.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(readbackBuffer.getMappedRange()).slice();
+      readbackBuffer.unmap();
+
+      // Expected results after 90° Z rotation:
+      // (1,0,0) -> (0,1,0)
+      // (0,1,0) -> (-1,0,0)
+      // (0,0,1) -> (0,0,1)
+      // (0,0,0) -> (0,0,0)
+
+      const expected = [
+        [0, 1, 0],
+        [-1, 0, 0],
+        [0, 0, 1],
+        [0, 0, 0]
+      ];
+
+      let passed = true;
+      let details = '<pre>90° Z-axis rotation test:\n';
+      for (let i = 0; i < numVertices; i++) {
+        const input = [positions[i*3], positions[i*3+1], positions[i*3+2]];
+        const output = [result[i*3], result[i*3+1], result[i*3+2]];
+        const exp = expected[i];
+
+        details += `(${input.map(v => v.toFixed(1)).join(',')}) -> `;
+        details += `(${output.map(v => v.toFixed(2)).join(',')})`;
+        details += ` [expected: (${exp.map(v => v.toFixed(1)).join(',')})]`;
+
+        let match = true;
+        for (let j = 0; j < 3; j++) {
+          if (Math.abs(output[j] - exp[j]) > 0.01) {
+            passed = false;
+            match = false;
+            break;
+          }
+        }
+        details += match ? ' ✓' : ' ❌';
+        details += '\n';
+      }
+      details += '</pre>';
+
+      return { passed, details };
+    }
+
+    window.runAllTests = async () => {
+      clearResults();
+
+      try {
+        const device = await initWebGPU();
+        logTest('WebGPU Initialization', true, 'GPU device acquired successfully');
+
+        const test1 = await testIdentityTransform(device);
+        logTest('Identity Transform', test1.passed, test1.details);
+
+        const test2 = await testRotation(device);
+        logTest('90° Rotation Transform', test2.passed, test2.details);
+
+      } catch (error) {
+        logTest('Test Suite', false, `Error: ${error.message}`);
+      }
+    };
+
+    // Auto-run on load
+    window.addEventListener('load', runAllTests);
+  </script>
+</body>
+</html>

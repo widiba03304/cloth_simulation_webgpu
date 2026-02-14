@@ -1,0 +1,6 @@
+{
+  "id": "skirt",
+  "name": "A-Line Skirt",
+  "grid": { "rows": 20, "cols": 24, "spacing": 1.0 },
+  "pinned": "topRow"
+}

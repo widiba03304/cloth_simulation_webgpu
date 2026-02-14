@@ -1,0 +1,6 @@
+{
+  "id": "canvas",
+  "presetKey": "materials.canvas",
+  "albedo": [0.88, 0.85, 0.78],
+  "roughness": 0.95
+}

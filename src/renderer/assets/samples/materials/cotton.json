@@ -1,0 +1,6 @@
+{
+  "id": "cotton",
+  "presetKey": "materials.cotton",
+  "albedo": [0.95, 0.93, 0.88],
+  "roughness": 0.85
+}

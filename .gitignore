@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build / output
+out/
+dist/
+*.tsbuildinfo
+
+# Vite / Electron
+.vite/
+release/
+*.local
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+.cursor/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+.cursor/debug.log
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Native build artifacts (optional; uncomment if you don't want to track)
+# native/*.wasm
+# native/*.js
+# public/*.wasm
+# public/*.js
+
+# Large assets (generate locally; see README)
+smpl/models/*.pkl
+src/renderer/assets/samples/avatars/smpl_*_pose.json
+src/renderer/assets/samples/avatars/smpl_*_shapedirs.json

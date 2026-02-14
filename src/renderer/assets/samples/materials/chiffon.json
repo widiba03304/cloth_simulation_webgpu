@@ -1,0 +1,6 @@
+{
+  "id": "chiffon",
+  "presetKey": "materials.chiffon",
+  "albedo": [0.99, 0.98, 0.99],
+  "roughness": 0.25
+}

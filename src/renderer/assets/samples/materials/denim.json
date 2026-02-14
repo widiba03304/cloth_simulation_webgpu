@@ -1,0 +1,6 @@
+{
+  "id": "denim",
+  "presetKey": "materials.denim",
+  "albedo": [0.2, 0.28, 0.55],
+  "roughness": 0.9
+}

@@ -1,0 +1,288 @@
+/**
+ * GPU Skinning Tests
+ * Verifies that GPU skinning correctly applies joint transforms to mesh vertices
+ */
+
+import { describe, it, expect, beforeAll } from 'vitest';
+import { Skeleton } from '../src/renderer/ik/skeleton';
+import { GPUSkinning } from '../src/renderer/compute/gpuSkinning';
+import type { SMPLPoseData } from '../src/renderer/render/smplPoseData';
+import type { BodyMesh } from '../src/renderer/render/bodyMesh';
+
+describe('GPU Skinning', () => {
+  let device: GPUDevice;
+  let adapter: GPUAdapter;
+
+  beforeAll(async () => {
+    // Initialize WebGPU
+    if (!navigator.gpu) {
+      throw new Error('WebGPU not supported');
+    }
+
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      throw new Error('No GPU adapter found');
+    }
+
+    device = await adapter.requestDevice();
+  });
+
+  it('should apply identity transform correctly', async () => {
+    // Create minimal test data
+    const numVertices = 100;
+    const numJoints = 24;
+
+    const positions = new Float32Array(numVertices * 3);
+    for (let i = 0; i < numVertices; i++) {
+      positions[i * 3] = Math.random() * 2 - 1;     // x: -1 to 1
+      positions[i * 3 + 1] = Math.random() * 2 - 1; // y: -1 to 1
+      positions[i * 3 + 2] = Math.random() * 2 - 1; // z: -1 to 1
+    }
+
+    const normals = new Float32Array(numVertices * 3);
+    for (let i = 0; i < numVertices; i++) {
+      normals[i * 3] = 0;
+      normals[i * 3 + 1] = 1; // Up
+      normals[i * 3 + 2] = 0;
+    }
+
+    // All vertices weighted to joint 0 with weight 1.0
+    const weights = new Float32Array(numVertices * numJoints);
+    for (let i = 0; i < numVertices; i++) {
+      weights[i * numJoints] = 1.0; // Joint 0 weight = 1.0
+      // All other joints have weight 0.0 (already initialized)
+    }
+
+    const baseMesh: BodyMesh = {
+      positions,
+      normals,
+      indices: new Uint32Array(0),
+    };
+
+    const jointHierarchy = new Int32Array(numJoints).fill(-1);
+
+    const poseData: SMPLPoseData = {
+      num_vertices: numVertices,
+      num_joints: numJoints,
+      num_shape_params: 10,
+      num_pose_params: 72,
+      weights,
+      joint_positions: new Float32Array(numJoints * 3),
+      joint_hierarchy: jointHierarchy,
+    };
+
+    // Create skeleton with identity transforms
+    const skeleton = new Skeleton(poseData);
+
+    // Create GPU skinning
+    const gpuSkinning = new GPUSkinning(device, poseData, baseMesh);
+
+    // Compute skinning with identity transform
+    const commandEncoder = device.createCommandEncoder();
+    gpuSkinning.computeSkinning(skeleton, commandEncoder);
+
+    // Create readback buffer
+    const readbackBuffer = device.createBuffer({
+      size: numVertices * 3 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    // Copy result to readback buffer
+    commandEncoder.copyBufferToBuffer(
+      gpuSkinning.getDeformedPositionsBuffer(),
+      0,
+      readbackBuffer,
+      0,
+      numVertices * 3 * Float32Array.BYTES_PER_ELEMENT
+    );
+
+    device.queue.submit([commandEncoder.finish()]);
+
+    // Read back results
+    await readbackBuffer.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(readbackBuffer.getMappedRange());
+
+    // Verify identity transform: output should equal input
+    for (let i = 0; i < numVertices * 3; i++) {
+      expect(result[i]).toBeCloseTo(positions[i], 4);
+    }
+
+    readbackBuffer.unmap();
+    gpuSkinning.dispose();
+  });
+
+  it('should apply translation correctly', async () => {
+    const numVertices = 100;
+    const numJoints = 24;
+
+    const positions = new Float32Array(numVertices * 3);
+    for (let i = 0; i < numVertices; i++) {
+      positions[i * 3] = 0;     // x = 0
+      positions[i * 3 + 1] = 0; // y = 0
+      positions[i * 3 + 2] = 0; // z = 0
+    }
+
+    const normals = new Float32Array(numVertices * 3).fill(0);
+    const weights = new Float32Array(numVertices * numJoints);
+    for (let i = 0; i < numVertices; i++) {
+      weights[i * numJoints] = 1.0; // All weight on joint 0
+    }
+
+    const baseMesh: BodyMesh = {
+      positions,
+      normals,
+      indices: new Uint32Array(0),
+    };
+
+    const jointPositions = new Float32Array(numJoints * 3);
+    // Set joint 0 position to (1, 2, 3)
+    jointPositions[0] = 1.0;
+    jointPositions[1] = 2.0;
+    jointPositions[2] = 3.0;
+
+    const poseData: SMPLPoseData = {
+      num_vertices: numVertices,
+      num_joints: numJoints,
+      num_shape_params: 10,
+      num_pose_params: 72,
+      weights,
+      joint_positions: jointPositions,
+      joint_hierarchy: new Int32Array(numJoints).fill(-1),
+    };
+
+    const skeleton = new Skeleton(poseData);
+    const gpuSkinning = new GPUSkinning(device, poseData, baseMesh);
+
+    const commandEncoder = device.createCommandEncoder();
+    gpuSkinning.computeSkinning(skeleton, commandEncoder);
+
+    const readbackBuffer = device.createBuffer({
+      size: numVertices * 3 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    commandEncoder.copyBufferToBuffer(
+      gpuSkinning.getDeformedPositionsBuffer(),
+      0,
+      readbackBuffer,
+      0,
+      numVertices * 3 * Float32Array.BYTES_PER_ELEMENT
+    );
+
+    device.queue.submit([commandEncoder.finish()]);
+    await readbackBuffer.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(readbackBuffer.getMappedRange());
+
+    // All vertices should be translated by joint position
+    for (let i = 0; i < numVertices; i++) {
+      expect(result[i * 3]).toBeCloseTo(1.0, 4);     // x
+      expect(result[i * 3 + 1]).toBeCloseTo(2.0, 4); // y
+      expect(result[i * 3 + 2]).toBeCloseTo(3.0, 4); // z
+    }
+
+    readbackBuffer.unmap();
+    gpuSkinning.dispose();
+  });
+
+  it('should apply rotation correctly', async () => {
+    const numVertices = 4;
+    const numJoints = 24;
+
+    // Test vertices along X, Y, Z axes
+    const positions = new Float32Array([
+      1, 0, 0,  // +X
+      0, 1, 0,  // +Y
+      0, 0, 1,  // +Z
+      0, 0, 0,  // Origin
+    ]);
+
+    const normals = new Float32Array(numVertices * 3).fill(0);
+    const weights = new Float32Array(numVertices * numJoints);
+    for (let i = 0; i < numVertices; i++) {
+      weights[i * numJoints] = 1.0;
+    }
+
+    const baseMesh: BodyMesh = {
+      positions,
+      normals,
+      indices: new Uint32Array(0),
+    };
+
+    const poseData: SMPLPoseData = {
+      num_vertices: numVertices,
+      num_joints: numJoints,
+      num_shape_params: 10,
+      num_pose_params: 72,
+      weights,
+      joint_positions: new Float32Array(numJoints * 3),
+      joint_hierarchy: new Int32Array(numJoints).fill(-1),
+    };
+
+    const skeleton = new Skeleton(poseData);
+
+    // Apply 90-degree rotation around Z axis
+    // This should transform:
+    // (1,0,0) -> (0,1,0)
+    // (0,1,0) -> (-1,0,0)
+    // (0,0,1) -> (0,0,1) (unchanged)
+    const angle = Math.PI / 2; // 90 degrees
+    const quat: [number, number, number, number] = [
+      0,
+      0,
+      Math.sin(angle / 2),
+      Math.cos(angle / 2)
+    ];
+    skeleton.setJointRotation(0, quat);
+    skeleton.updateWorldTransforms();
+
+    const gpuSkinning = new GPUSkinning(device, poseData, baseMesh);
+    const commandEncoder = device.createCommandEncoder();
+    gpuSkinning.computeSkinning(skeleton, commandEncoder);
+
+    const readbackBuffer = device.createBuffer({
+      size: numVertices * 3 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    commandEncoder.copyBufferToBuffer(
+      gpuSkinning.getDeformedPositionsBuffer(),
+      0,
+      readbackBuffer,
+      0,
+      numVertices * 3 * Float32Array.BYTES_PER_ELEMENT
+    );
+
+    device.queue.submit([commandEncoder.finish()]);
+    await readbackBuffer.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(readbackBuffer.getMappedRange());
+
+    console.log('Rotation test results:');
+    console.log('  Input (1,0,0) -> Output:', result.slice(0, 3));
+    console.log('  Input (0,1,0) -> Output:', result.slice(3, 6));
+    console.log('  Input (0,0,1) -> Output:', result.slice(6, 9));
+    console.log('  Input (0,0,0) -> Output:', result.slice(9, 12));
+
+    // (1,0,0) should become (0,1,0)
+    expect(result[0]).toBeCloseTo(0, 2);
+    expect(result[1]).toBeCloseTo(1, 2);
+    expect(result[2]).toBeCloseTo(0, 2);
+
+    // (0,1,0) should become (-1,0,0)
+    expect(result[3]).toBeCloseTo(-1, 2);
+    expect(result[4]).toBeCloseTo(0, 2);
+    expect(result[5]).toBeCloseTo(0, 2);
+
+    // (0,0,1) should stay (0,0,1)
+    expect(result[6]).toBeCloseTo(0, 2);
+    expect(result[7]).toBeCloseTo(0, 2);
+    expect(result[8]).toBeCloseTo(1, 2);
+
+    // (0,0,0) should stay (0,0,0)
+    expect(result[9]).toBeCloseTo(0, 2);
+    expect(result[10]).toBeCloseTo(0, 2);
+    expect(result[11]).toBeCloseTo(0, 2);
+
+    readbackBuffer.unmap();
+    gpuSkinning.dispose();
+  });
+});

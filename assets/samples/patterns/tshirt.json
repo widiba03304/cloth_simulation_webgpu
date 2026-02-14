@@ -1,0 +1,6 @@
+{
+  "id": "tshirt",
+  "name": "T-Shirt",
+  "grid": { "rows": 24, "cols": 24, "spacing": 1.2 },
+  "pinned": "topRow"
+}

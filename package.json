@@ -1,0 +1,66 @@
+{
+  "name": "cloth-simulation-webgpu",
+  "version": "0.1.0",
+  "description": "WebGPU cloth simulation for fashion designers",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "build:wasm": "cd native && make && mkdir -p ../public && cp cloth_sim_native.js cloth_sim_native.wasm ../public/",
+    "preview": "electron-vite preview",
+    "dist": "npm run build && electron-builder",
+    "dist:dir": "npm run build && electron-builder --dir",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:gpu": "vitest run --browser.enabled tests/gpuSkinning.browser.test.ts",
+    "test:all": "npm test && npm run test:gpu",
+    "test:webgpu": "open http://localhost:8888/tests/webgpu-browser-test.html && python3 -m http.server 8888",
+    "lint": "eslint src electron tests --max-warnings 0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.54.0",
+    "@typescript-eslint/parser": "^8.54.0",
+    "@vitest/browser": "^4.0.18",
+    "@vitest/browser-playwright": "^4.0.18",
+    "@vitest/browser-webdriverio": "^4.0.18",
+    "@webgpu/types": "^0.1.69",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.1",
+    "electron-vite": "^2.0.0",
+    "eslint": "^9.39.2",
+    "playwright": "^1.58.2",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "vitest": "^4.0.18",
+    "webdriverio": "^9.24.0"
+  },
+  "build": {
+    "appId": "com.clothsim.webgpu",
+    "productName": "Cloth Simulation",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.graphics",
+      "forceCodeSigning": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

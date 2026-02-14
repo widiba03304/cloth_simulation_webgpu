@@ -1,0 +1,6 @@
+{
+  "id": "scarf",
+  "name": "Rectangular Scarf",
+  "grid": { "rows": 32, "cols": 16, "spacing": 0.8 },
+  "pinned": "none"
+}
