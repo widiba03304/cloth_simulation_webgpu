@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: Lint · Typecheck · Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (0 warnings allowed)
+        run: npm run lint
+
+      - name: Typecheck
+        # tsc --noEmit: validate types without emitting build output.
+        # tsconfig.node.json is for Electron main; src/renderer uses tsconfig.json.
+        run: npx tsc --noEmit && npx tsc --noEmit -p tsconfig.node.json
+
+      - name: Unit tests
+        run: npm test
+        # Note: WebGPU browser tests (*.browser.test.ts, npm run test:gpu) require
+        # a headed Chromium with --enable-unsafe-webgpu. They are excluded here
+        # because GitHub Actions runners do not have GPU hardware. Run locally with:
+        #   npm run test:gpu

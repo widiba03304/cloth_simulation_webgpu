@@ -18,9 +18,10 @@ export function createTestPoseData(
   }
 
   // Create kintree_table from hierarchy
+  // skeleton.ts reads kintree_table[0][i] as parent of joint i (SMPL format)
   const kintree = [
-    Array.from({ length: numJoints }, (_, i) => i),  // Row 0: joint IDs
-    Array.from(jointHierarchy)                        // Row 1: parent IDs
+    Array.from(jointHierarchy),                        // Row 0: parent IDs
+    Array.from({ length: numJoints }, (_, i) => i),   // Row 1: joint IDs
   ];
 
   // Create minimal required data

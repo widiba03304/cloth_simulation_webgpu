@@ -5,7 +5,12 @@ import { createTestPoseData } from "./testUtils";
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { Skeleton } from '../src/renderer/ik/skeleton';
+import {
+  Skeleton,
+  quatMultiply, quatConjugate, quatNormalize,
+  vec3Distance, vec3Normalize, vec3Subtract, vec3Add, vec3Scale, vec3Dot,
+  quatFromTwoVectors, quatFromAxisAngle, quatToEuler, eulerToQuat,
+} from '../src/renderer/ik/skeleton';
 // import type { SMPLPoseData } from '../src/renderer/render/smplPoseData';
 
 describe('Skeleton', () => {
@@ -200,5 +205,291 @@ describe('Skeleton', () => {
       expect(skeleton.getJoint(-1)).toBeNull();
       expect(skeleton.getJoint(999)).toBeNull();
     });
+  });
+
+  describe('Other Skeleton methods', () => {
+    it('getJointByName returns joint when found', () => {
+      const joint = skeleton.getJointByName('joint_0');
+      expect(joint).not.toBeNull();
+      expect(joint?.id).toBe(0);
+    });
+
+    it('getJointByName returns null when not found', () => {
+      expect(skeleton.getJointByName('nonexistent')).toBeNull();
+    });
+
+    it('getJointWorldPosition returns null for invalid joint', () => {
+      expect(skeleton.getJointWorldPosition(999)).toBeNull();
+    });
+
+    it('setJointPosition updates local position', () => {
+      skeleton.setJointPosition(1, [5, 5, 5]);
+      expect(skeleton.joints[1].localPosition).toEqual([5, 5, 5]);
+    });
+
+    it('resetPose restores joints to rest positions', () => {
+      skeleton.setJointRotation(1, [0.5, 0.5, 0.5, 0.5]);
+      skeleton.resetPose();
+      expect(skeleton.joints[1].localRotation).toEqual([0, 0, 0, 1]);
+    });
+
+    it('getBoneLength returns distance between two joints', () => {
+      skeleton.updateWorldTransforms();
+      const len = skeleton.getBoneLength(0, 1);
+      expect(len).toBeGreaterThan(0);
+    });
+
+    it('getBoneLength returns 0 for invalid joint IDs', () => {
+      expect(skeleton.getBoneLength(999, 0)).toBe(0);
+      expect(skeleton.getBoneLength(0, 999)).toBe(0);
+    });
+  });
+});
+
+describe('Skeleton utility functions', () => {
+  it('quatMultiply: identity * identity = identity', () => {
+    const id: [number,number,number,number] = [0,0,0,1];
+    const r = quatMultiply(id, id);
+    expect(r[3]).toBeCloseTo(1);
+    expect(r[0]).toBeCloseTo(0);
+  });
+
+  it('quatConjugate: negates xyz, keeps w', () => {
+    const r = quatConjugate([0.1, 0.2, 0.3, 0.9]);
+    expect(r[0]).toBeCloseTo(-0.1);
+    expect(r[1]).toBeCloseTo(-0.2);
+    expect(r[2]).toBeCloseTo(-0.3);
+    expect(r[3]).toBeCloseTo(0.9);
+  });
+
+  it('quatNormalize: normalizes to unit length', () => {
+    const r = quatNormalize([1, 1, 1, 1]);
+    const len = Math.sqrt(r[0]**2 + r[1]**2 + r[2]**2 + r[3]**2);
+    expect(len).toBeCloseTo(1.0);
+  });
+
+  it('quatNormalize: zero quaternion returns identity', () => {
+    const r = quatNormalize([0, 0, 0, 0]);
+    expect(r).toEqual([0, 0, 0, 1]);
+  });
+
+  it('vec3Distance: correct distance', () => {
+    expect(vec3Distance([0,0,0], [3,4,0])).toBeCloseTo(5);
+  });
+
+  it('vec3Normalize: normalizes non-zero vector', () => {
+    const r = vec3Normalize([3, 4, 0]);
+    expect(Math.sqrt(r[0]**2+r[1]**2+r[2]**2)).toBeCloseTo(1.0);
+  });
+
+  it('vec3Normalize: zero vector returns [0,0,0]', () => {
+    expect(vec3Normalize([0, 0, 0])).toEqual([0, 0, 0]);
+  });
+
+  it('vec3Subtract: correct result', () => {
+    expect(vec3Subtract([3,2,1],[1,1,1])).toEqual([2,1,0]);
+  });
+
+  it('vec3Add: correct result', () => {
+    expect(vec3Add([1,2,3],[4,5,6])).toEqual([5,7,9]);
+  });
+
+  it('vec3Scale: correct result', () => {
+    expect(vec3Scale([1,2,3], 2)).toEqual([2,4,6]);
+  });
+
+  it('vec3Dot: correct dot product', () => {
+    expect(vec3Dot([1,0,0],[0,1,0])).toBeCloseTo(0);
+    expect(vec3Dot([1,0,0],[1,0,0])).toBeCloseTo(1);
+  });
+
+  it('quatFromTwoVectors: identity for parallel vectors', () => {
+    const r = quatFromTwoVectors([1,0,0],[1,0,0]);
+    expect(r[3]).toBeCloseTo(1); // identity quaternion
+  });
+
+  it('quatFromTwoVectors: 180° rotation for opposite vectors', () => {
+    const r = quatFromTwoVectors([1,0,0],[-1,0,0]);
+    // w should be 0 for 180° rotation
+    expect(r[3]).toBeCloseTo(0);
+  });
+
+  it('quatFromTwoVectors: general case', () => {
+    const r = quatFromTwoVectors([1,0,0],[0,1,0]);
+    const len = Math.sqrt(r[0]**2+r[1]**2+r[2]**2+r[3]**2);
+    expect(len).toBeCloseTo(1.0);
+  });
+
+  it('quatFromAxisAngle: rotation around Y by PI/2', () => {
+    const r = quatFromAxisAngle([0,1,0], Math.PI/2);
+    expect(r[1]).toBeCloseTo(Math.sin(Math.PI/4));
+    expect(r[3]).toBeCloseTo(Math.cos(Math.PI/4));
+  });
+
+  it('quatToEuler: identity quaternion gives zero angles', () => {
+    const r = quatToEuler([0,0,0,1]);
+    expect(r[0]).toBeCloseTo(0);
+    expect(r[1]).toBeCloseTo(0);
+    expect(r[2]).toBeCloseTo(0);
+  });
+
+  it('quatToEuler: |sinp| >= 1 covers gimbal lock branch', () => {
+    // Use q=[0,1,0,1] (non-unit OK for math): sinp = 2*(w*y - z*x) = 2*(1*1-0) = 2 >= 1
+    const r = quatToEuler([0, 1, 0, 1]);
+    expect(Math.abs(r[1])).toBeCloseTo(Math.PI/2);
+  });
+
+  it('eulerToQuat: zero angles gives identity quaternion', () => {
+    const r = eulerToQuat([0, 0, 0]);
+    expect(r[3]).toBeCloseTo(1);
+    expect(r[0]).toBeCloseTo(0);
+  });
+
+  it('eulerToQuat: round-trips through quatToEuler', () => {
+    const euler: [number,number,number] = [0.3, 0.2, 0.1];
+    const q = eulerToQuat(euler);
+    const back = quatToEuler(q);
+    expect(back[0]).toBeCloseTo(euler[0], 4);
+    expect(back[1]).toBeCloseTo(euler[1], 4);
+    expect(back[2]).toBeCloseTo(euler[2], 4);
+  });
+});
+
+describe('Skeleton applyJointConstraint (private method)', () => {
+  function make5JointSkeleton(): Skeleton {
+    const numJoints = 5;
+    const jointPositions = new Float32Array([0,0,0, 1,0,0, 2,0,0, 3,0,0, 4,0,0]);
+    const jointHierarchy = new Int32Array([-1, 0, 1, 2, 3]);
+    const poseData = createTestPoseData(numJoints, 10, jointPositions, jointHierarchy);
+    const sk = new Skeleton(poseData);
+    sk.updateWorldTransforms();
+    return sk;
+  }
+
+  it('hinge: returns rotation unchanged when within limits', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'hinge', hingeAxis: 'x', minAngle: 0, maxAngle: Math.PI };
+    const rot: [number,number,number,number] = [Math.sin(Math.PI/8), 0, 0, Math.cos(Math.PI/8)];
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result[3]).toBeCloseTo(rot[3], 4);
+  });
+
+  it('hinge x-axis: clamps rotation exceeding maxAngle', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'hinge', hingeAxis: 'x', minAngle: 0, maxAngle: Math.PI / 4 };
+    const rot: [number,number,number,number] = [1, 0, 0, 0]; // 180° around X → exceeds PI/4
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+
+  it('hinge y-axis: clamps rotation exceeding maxAngle', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'hinge', hingeAxis: 'y', minAngle: 0, maxAngle: Math.PI / 4 };
+    const rot: [number,number,number,number] = [0, 1, 0, 0]; // 180° around Y → exceeds PI/4
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+
+  it('hinge z-axis: clamps rotation exceeding maxAngle', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'hinge', hingeAxis: 'z', minAngle: 0, maxAngle: Math.PI / 4 };
+    const rot: [number,number,number,number] = [0, 0, 1, 0]; // 180° around Z → exceeds PI/4
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+
+  it('ball: returns rotation unchanged when within maxSwing', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'ball', maxSwing: Math.PI };
+    const rot: [number,number,number,number] = [0, Math.sin(Math.PI/8), 0, Math.cos(Math.PI/8)];
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result[3]).toBeCloseTo(rot[3], 4);
+  });
+
+  it('ball: clamps rotation exceeding maxSwing', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'ball', maxSwing: Math.PI / 4 };
+    const rot: [number,number,number,number] = [0, 1, 0, 0]; // 180° → angle=PI > PI/4
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+
+  it('multi-axis: returns rotation unchanged when within all limits', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'multi-axis', axisLimits: [-Math.PI, Math.PI, -Math.PI, Math.PI, -Math.PI, Math.PI] };
+    const rot: [number,number,number,number] = [0.1, 0.1, 0.1, 0.987];
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+
+  it('multi-axis: clamps when euler angles exceed limits', () => {
+    const sk = make5JointSkeleton();
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'multi-axis', axisLimits: [0, Math.PI/4, 0, Math.PI/4, 0, Math.PI/4] };
+    const rot: [number,number,number,number] = [1, 0, 0, 0]; // 180° → euler[0]=PI > PI/4
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toHaveLength(4);
+  });
+});
+
+describe('Skeleton getChain without rootId', () => {
+  it('walks to absolute root when rootId is undefined', () => {
+    const numJoints = 5;
+    const jointPositions = new Float32Array([0,0,0, 1,0,0, 2,0,0, 3,0,0, 4,0,0]);
+    const jointHierarchy = new Int32Array([-1, 0, 1, 2, 3]);
+    const poseData = createTestPoseData(numJoints, 10, jointPositions, jointHierarchy);
+    const sk = new Skeleton(poseData);
+    const chain = sk.getChain(4); // no rootId → walk all the way to root
+    expect(chain).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+describe('Skeleton updateWorldTransforms with 22-joint skeleton', () => {
+  it('covers joints 17/19/21 console-log branches', () => {
+    const numJoints = 22;
+    const jointPositions = new Float32Array(numJoints * 3); // all at origin
+    const parentArr = [-1, ...Array.from({ length: 21 }, (_, i) => i)];
+    const jointHierarchy = new Int32Array(parentArr);
+    const poseData = createTestPoseData(numJoints, 10, jointPositions, jointHierarchy);
+    const sk = new Skeleton(poseData);
+    expect(() => sk.updateWorldTransforms()).not.toThrow();
+  });
+});
+
+describe('Skeleton constructor edge cases', () => {
+  it('unsigned -1 parent (line 96): parent > numJoints is treated as root', () => {
+    const poseData = {
+      num_joints: 5,
+      num_vertices: 10,
+      v_template: new Float32Array(30),
+      j_regressor: new Float32Array(50),
+      joint_positions: new Float32Array(15),
+      kintree_table: [[100, 0, 1, 2, 3], [0, 1, 2, 3, 4]], // 100 > numJoints=5 → treated as -1
+      weights: new Float32Array(50),
+      joint_names: ['j0', 'j1', 'j2', 'j3', 'j4'],
+    };
+    expect(() => new Skeleton(poseData as any)).not.toThrow();
+  });
+});
+
+describe('Skeleton applyJointConstraint unknown type fallthrough', () => {
+  it('unknown constraint type falls through to line 380 return rotation', () => {
+    const numJoints = 5;
+    const jointPositions = new Float32Array([0,0,0, 1,0,0, 2,0,0, 3,0,0, 4,0,0]);
+    const jointHierarchy = new Int32Array([-1, 0, 1, 2, 3]);
+    const poseData = createTestPoseData(numJoints, 10, jointPositions, jointHierarchy);
+    const sk = new Skeleton(poseData);
+    const joint = sk.joints[1]!;
+    joint.constraint = { type: 'unknown' as any };
+    const rot: [number,number,number,number] = [0, 0, 0, 1];
+    const result = (sk as any).applyJointConstraint(joint, rot);
+    expect(result).toEqual(rot);
   });
 });

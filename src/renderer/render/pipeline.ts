@@ -1,16 +1,18 @@
 /**
- * Render pipeline: cloth from vertex buffer + index buffer. Consumes sim output.
- * Also draws a simple mannequin body behind the cloth. IBL only (no directional light).
+ * Render pipeline: mannequin body, ground, skybox. IBL only (no directional light).
  */
 
-import clothVertWgsl from './cloth.vert.wgsl?raw';
-import clothFragWgsl from './cloth.frag.wgsl?raw';
 import bodyVertWgsl from './body.vert.wgsl?raw';
 import bodyFragWgsl from './body.frag.wgsl?raw';
 import skyboxVertWgsl from './skybox.vert.wgsl?raw';
 import skyboxFragWgsl from './skybox.frag.wgsl?raw';
+import gridVertWgsl from './grid.vert.wgsl?raw';
+import gridFragWgsl from './grid.frag.wgsl?raw';
+import cloth3dVertWgsl from './cloth3d.vert.wgsl?raw';
+import cloth3dFragWgsl from './cloth3d.frag.wgsl?raw';
 import { buildMannequinMesh, type BodyMesh } from './bodyMesh';
-import { loadDefaultCubemap, loadCubemap, createFallbackCubemap, CUBEMAP_BASE_URL, type CubemapResource } from './cubemap';
+import { createWhiteCubemap, loadCubemap, createFallbackCubemap, CUBEMAP_BASE_URL, type CubemapResource } from './cubemap';
+import type { Cloth3DRenderData } from '../sim/cloth3d/cloth3d';
 
 const VIEW_PROJ_SIZE = 64; // mat4
 const BODY_COLOR_SIZE = 16; // vec4
@@ -19,11 +21,7 @@ export interface RenderContext {
   device: GPUDevice;
   context: GPUCanvasContext;
   format: GPUTextureFormat;
-  pipeline: GPURenderPipeline;
   viewProjBuffer: GPUBuffer;
-  vertexBuffer: GPUBuffer;
-  indexBuffer: GPUBuffer;
-  numIndices: number;
   bodyPipeline: GPURenderPipeline;
   bodyVertexBuffer: GPUBuffer;
   bodyNormalBuffer: GPUBuffer;
@@ -35,15 +33,20 @@ export interface RenderContext {
   groundIndexBuffer: GPUBuffer;
   groundColorBuffer: GPUBuffer;
   cubemap: CubemapResource;
+  /** 'grid' = white + grid background; 'cubemap' = skybox. */
+  backgroundMode: 'grid' | 'cubemap';
   skyboxPipeline: GPURenderPipeline;
   skyboxVertexBuffer: GPUBuffer;
   skyboxIndexBuffer: GPUBuffer;
   skyboxInvViewProjBuffer: GPUBuffer;
+  gridPipeline: GPURenderPipeline;
   cubemapSampler: GPUSampler;
-  pbrParamsBuffer: GPUBuffer;
-  /** Main pass depth (created on first draw, resized when canvas size changes) */
+  groundPbrBuffer: GPUBuffer;
+  bodyPbrBuffer: GPUBuffer;
   mainDepthTexture?: GPUTexture;
   mainDepthView?: GPUTextureView;
+  /** Pipeline for 3D cloth rendering (double-sided IBL PBR). */
+  clothPipeline: GPURenderPipeline;
 }
 
 // Cube centered at origin; must fit inside camera far plane (100) so use 50
@@ -59,68 +62,18 @@ const SKYBOX_INDICES = new Uint32Array([
 ]);
 
 /**
- * Create render context. Vertex buffer size = maxVertices * 12 (vec3).
- * bodyMesh: optional SMPL/mannequin mesh; if null/undefined, uses built-in cylinder+sphere.
+ * Create render context. bodyMesh: optional SMPL/mannequin; if null/undefined, uses built-in cylinder+sphere.
  * Loads default cubemap from src/renderer/assets/samples/cubemaps/studio_1.
  */
 export async function createRenderPipeline(
   device: GPUDevice,
   context: GPUCanvasContext,
   format: GPUTextureFormat,
-  numVertices: number,
-  indices: Uint32Array,
   bodyMesh?: BodyMesh | null
 ): Promise<RenderContext> {
   const viewProjBuffer = device.createBuffer({
     size: VIEW_PROJ_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-
-  const vertexBuffer = device.createBuffer({
-    size: numVertices * 12,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-  });
-  const indexBuffer = device.createBuffer({
-    size: indices.byteLength,
-    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(indexBuffer, 0, indices);
-
-  const clothVertModule = device.createShaderModule({ code: clothVertWgsl, label: 'Cloth Vertex' });
-  const clothFragModule = device.createShaderModule({ code: clothFragWgsl, label: 'Cloth Fragment' });
-
-  // Log shader compilation errors if any
-  clothVertModule.getCompilationInfo().then(info => {
-    for (const m of info.messages) if (m.type === 'error') console.error(`[Cloth Vert] ${m.message} line ${m.lineNum}`);
-  });
-  clothFragModule.getCompilationInfo().then(info => {
-    for (const m of info.messages) if (m.type === 'error') console.error(`[Cloth Frag] ${m.message} line ${m.lineNum}`);
-  });
-
-  const pipeline = device.createRenderPipeline({
-    layout: 'auto',
-    label: 'Cloth Pipeline',
-    vertex: {
-      module: clothVertModule,
-      entryPoint: 'main',
-      buffers: [
-        {
-          arrayStride: 12,
-          attributes: [{ format: 'float32x3', offset: 0, shaderLocation: 0 }],
-        },
-      ],
-    },
-    fragment: {
-      module: clothFragModule,
-      entryPoint: 'main',
-      targets: [{ format }],
-    },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-    depthStencil: {
-      format: 'depth32float',
-      depthWriteEnabled: true,
-      depthCompare: 'less-equal',
-    },
   });
 
   const bodySource = bodyMesh ?? buildMannequinMesh();
@@ -221,6 +174,9 @@ export async function createRenderPipeline(
       format: 'depth32float',
       depthWriteEnabled: true,
       depthCompare: 'less-equal',
+      // Push body slightly deeper to prevent z-fighting with cloth at surface
+      depthBias: 2,
+      depthBiasSlopeScale: 1.0,
     },
   });
 
@@ -258,7 +214,6 @@ export async function createRenderPipeline(
       entryPoint: 'main',
       targets: [{ format }],
     },
-    // From inside cube: cull none so inner faces always draw (winding can be either way).
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: {
       format: 'depth32float',
@@ -267,34 +222,87 @@ export async function createRenderPipeline(
     },
   });
 
-  let cubemap: CubemapResource;
-  try {
-    const loaded = await loadDefaultCubemap(device);
-    cubemap = loaded || createFallbackCubemap(device);
-  } catch {
-    // Use fallback gray cubemap if loading fails
-    cubemap = createFallbackCubemap(device);
-  }
+  const gridPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module: device.createShaderModule({ code: gridVertWgsl }),
+      entryPoint: 'main',
+    },
+    fragment: {
+      module: device.createShaderModule({ code: gridFragWgsl }),
+      entryPoint: 'main',
+      targets: [{ format }],
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'less-equal',
+    },
+  });
+
+  // Default: white cubemap for IBL and grid background (no cubemap image loaded).
+  const cubemap = createWhiteCubemap(device);
 
   const cubemapSampler = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
 
-  // PBR parameters buffer: roughness, metallic, ambientStrength, reflectionStrength, cameraPos(xyz), padding
-  const pbrParamsBuffer = device.createBuffer({
-    size: 32, // 8 floats (4 params + vec3 cameraPos + padding)
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  // ── Cloth 3D render pipeline (double-sided, matches body bind group layout) ──
+  const cloth3dVertModule = device.createShaderModule({ code: cloth3dVertWgsl, label: 'Cloth3D Vert' });
+  const cloth3dFragModule = device.createShaderModule({ code: cloth3dFragWgsl, label: 'Cloth3D Frag' });
+  cloth3dVertModule.getCompilationInfo().then(info => {
+    for (const m of info.messages) if (m.type === 'error') console.error(`[Cloth3D Vert] ${m.message} line ${m.lineNum}`);
   });
-  const pbrParams = new Float32Array([0.5, 0.1, 0.3, 0.1, 0, 0, 3, 0]); // defaults + camera at (0,0,3)
-  device.queue.writeBuffer(pbrParamsBuffer, 0, pbrParams);
+  cloth3dFragModule.getCompilationInfo().then(info => {
+    for (const m of info.messages) if (m.type === 'error') console.error(`[Cloth3D Frag] ${m.message} line ${m.lineNum}`);
+  });
+
+  const clothPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    label: 'Cloth3D Pipeline',
+    vertex: {
+      module: cloth3dVertModule,
+      entryPoint: 'main',
+      buffers: [
+        { arrayStride: 12, attributes: [{ format: 'float32x3', offset: 0, shaderLocation: 0 }] }, // pos
+        { arrayStride: 12, attributes: [{ format: 'float32x3', offset: 0, shaderLocation: 1 }] }, // normal
+      ],
+    },
+    fragment: {
+      module: cloth3dFragModule,
+      entryPoint: 'main',
+      targets: [{
+        format,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },  // double-sided
+    depthStencil: {
+      format: 'depth32float',
+      depthWriteEnabled: true,
+      depthCompare: 'less-equal',
+    },
+  });
+
+  const PBR_BUFFER_SIZE = 32; // 8 floats: roughness, metallic, ambientStrength, reflectionStrength, cameraPos(xyz), padding
+  const createPbrBuffer = (r: number, m: number, a: number, refl: number): GPUBuffer => {
+    const buf = device.createBuffer({
+      size: PBR_BUFFER_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(buf, 0, new Float32Array([r, m, a, refl, 0, 0, 3, 0]));
+    return buf;
+  };
+  const groundPbrBuffer = createPbrBuffer(0.9, 0, 0.4, 0.1);
+  const bodyPbrBuffer = createPbrBuffer(1, 0, 1, 0.5);
 
   return {
     device,
     context,
     format,
-    pipeline,
     viewProjBuffer,
-    vertexBuffer,
-    indexBuffer,
-    numIndices: indices.length,
     bodyPipeline,
     bodyVertexBuffer,
     bodyNormalBuffer,
@@ -306,12 +314,16 @@ export async function createRenderPipeline(
     groundIndexBuffer,
     groundColorBuffer,
     cubemap,
+    backgroundMode: 'grid',
     skyboxPipeline,
     skyboxVertexBuffer,
     skyboxIndexBuffer,
     skyboxInvViewProjBuffer,
+    gridPipeline,
     cubemapSampler,
-    pbrParamsBuffer,
+    groundPbrBuffer,
+    bodyPbrBuffer,
+    clothPipeline,
   };
 }
 
@@ -403,26 +415,13 @@ function ensureMainDepth(ctx: RenderContext): void {
   ctx.mainDepthView = ctx.mainDepthTexture.createView();
 }
 
-/** PBR params passed each frame so roughness/metallic/etc. always match UI. */
-export interface PBRState {
-  roughness: number;
-  metallic: number;
-  ambientStrength: number;
-  reflectionStrength: number;
-}
-
 /**
- * Single main render pass (standard): clear once, upload viewProj once, draw skybox → body → cloth.
- * viewProj is row-major from camera; we convert to column-major for WGSL.
- * Writes full PBR buffer (params + camera) each frame so UI sliders take effect immediately.
+ * Main render pass: clear once, draw ground → body → skybox.
  */
 export function drawMainPass(
   ctx: RenderContext,
   viewProj: Float32Array,
-  positionBuffer: GPUBuffer,
-  positionBufferSize: number,
-  cameraEye?: [number, number, number],
-  pbrState?: PBRState
+  cameraEye?: [number, number, number]
 ): void {
   ensureMainDepth(ctx);
   if (!ctx.mainDepthView) return;
@@ -431,26 +430,27 @@ export function drawMainPass(
   rowMajorToColumnMajor(viewProjColMajor, viewProj);
   ctx.device.queue.writeBuffer(ctx.viewProjBuffer, 0, viewProjColMajor);
 
-  // Write full PBR buffer each frame (std140: 4 floats + vec3 camera + padding) so roughness/metallic/etc. always apply
-  const roughness = pbrState?.roughness ?? 0.5;
-  const metallic = pbrState?.metallic ?? 0.1;
-  const ambientStrength = pbrState?.ambientStrength ?? 0.3;
-  const reflectionStrength = pbrState?.reflectionStrength ?? 0.1;
   const cx = cameraEye?.[0] ?? 0;
   const cy = cameraEye?.[1] ?? 0;
   const cz = cameraEye?.[2] ?? 3;
-  const pbrData = new Float32Array([roughness, metallic, ambientStrength, reflectionStrength, cx, cy, cz, 0]);
-  ctx.device.queue.writeBuffer(ctx.pbrParamsBuffer, 0, pbrData);
+  const writePbr = (buf: GPUBuffer, r: number, m: number, a: number, refl: number) => {
+    ctx.device.queue.writeBuffer(buf, 0, new Float32Array([r, m, a, refl, cx, cy, cz, 0]));
+  };
+  writePbr(ctx.groundPbrBuffer, 0.9, 0, 0.4, 0.1);
+  writePbr(ctx.bodyPbrBuffer, 1, 0, 1, 0.5);
+
+  const isGrid = ctx.backgroundMode === 'grid';
+  const clearColor = isGrid
+    ? { r: 0.45, g: 0.45, b: 0.45, a: 1 }   // gray sky for grid mode
+    : { r: 0.1, g: 0.1, b: 0.15, a: 1 };      // dark blue for cubemap mode
 
   const encoder = ctx.device.createCommandEncoder();
-  encoder.copyBufferToBuffer(positionBuffer, 0, ctx.vertexBuffer, 0, positionBufferSize);
-
   const view = ctx.context.getCurrentTexture().createView();
   const pass = encoder.beginRenderPass({
     colorAttachments: [
       {
         view,
-        clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 },
+        clearValue: clearColor,
         loadOp: 'clear',
         storeOp: 'store',
       },
@@ -463,27 +463,39 @@ export function drawMainPass(
     },
   });
 
-  pass.setPipeline(ctx.bodyPipeline);
-  pass.setBindGroup(0, ctx.device.createBindGroup({
-    layout: ctx.bodyPipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: ctx.viewProjBuffer } },
-      { binding: 1, resource: { buffer: ctx.groundColorBuffer } },
-    ],
-  }));
-  pass.setBindGroup(1, ctx.device.createBindGroup({
-    layout: ctx.bodyPipeline.getBindGroupLayout(1),
-    entries: [
-      { binding: 0, resource: ctx.cubemap.view },
-      { binding: 1, resource: ctx.cubemapSampler },
-      { binding: 2, resource: { buffer: ctx.pbrParamsBuffer } },
-    ],
-  }));
-  pass.setVertexBuffer(0, ctx.groundVertexBuffer);
-  pass.setVertexBuffer(1, ctx.groundNormalBuffer);
-  pass.setIndexBuffer(ctx.groundIndexBuffer, 'uint32');
-  pass.drawIndexed(6);
+  // Ground: 3D grid in grid mode, IBL-shaded plane in cubemap mode
+  if (isGrid) {
+    pass.setPipeline(ctx.gridPipeline);
+    pass.setBindGroup(0, ctx.device.createBindGroup({
+      layout: ctx.gridPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
+    }));
+    pass.draw(6, 1, 0, 0);
+  } else {
+    pass.setPipeline(ctx.bodyPipeline);
+    pass.setBindGroup(0, ctx.device.createBindGroup({
+      layout: ctx.bodyPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: ctx.viewProjBuffer } },
+        { binding: 1, resource: { buffer: ctx.groundColorBuffer } },
+      ],
+    }));
+    pass.setBindGroup(1, ctx.device.createBindGroup({
+      layout: ctx.bodyPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: ctx.cubemap.view },
+        { binding: 1, resource: ctx.cubemapSampler },
+        { binding: 2, resource: { buffer: ctx.groundPbrBuffer } },
+      ],
+    }));
+    pass.setVertexBuffer(0, ctx.groundVertexBuffer);
+    pass.setVertexBuffer(1, ctx.groundNormalBuffer);
+    pass.setIndexBuffer(ctx.groundIndexBuffer, 'uint32');
+    pass.drawIndexed(6);
+  }
 
+  // Body (mannequin)
+  pass.setPipeline(ctx.bodyPipeline);
   pass.setBindGroup(0, ctx.device.createBindGroup({
     layout: ctx.bodyPipeline.getBindGroupLayout(0),
     entries: [
@@ -491,44 +503,37 @@ export function drawMainPass(
       { binding: 1, resource: { buffer: ctx.bodyColorBuffer } },
     ],
   }));
+  pass.setBindGroup(1, ctx.device.createBindGroup({
+    layout: ctx.bodyPipeline.getBindGroupLayout(1),
+    entries: [
+      { binding: 0, resource: ctx.cubemap.view },
+      { binding: 1, resource: ctx.cubemapSampler },
+      { binding: 2, resource: { buffer: ctx.bodyPbrBuffer } },
+    ],
+  }));
   pass.setVertexBuffer(0, ctx.bodyVertexBuffer);
   pass.setVertexBuffer(1, ctx.bodyNormalBuffer);
   pass.setIndexBuffer(ctx.bodyIndexBuffer, 'uint32');
   pass.drawIndexed(ctx.bodyNumIndices);
 
-  pass.setPipeline(ctx.pipeline);
-  pass.setBindGroup(0, ctx.device.createBindGroup({
-    layout: ctx.pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
-  }));
-  pass.setBindGroup(1, ctx.device.createBindGroup({
-    layout: ctx.pipeline.getBindGroupLayout(1),
-    entries: [
-      { binding: 0, resource: ctx.cubemap.view },
-      { binding: 1, resource: ctx.cubemapSampler },
-      { binding: 2, resource: { buffer: ctx.pbrParamsBuffer } },
-    ],
-  }));
-  pass.setVertexBuffer(0, ctx.vertexBuffer);
-  pass.setIndexBuffer(ctx.indexBuffer, 'uint32');
-  pass.drawIndexed(ctx.numIndices);
-
-  // Skybox last: only passes depth test where nothing was drawn (depth still 1).
-  pass.setPipeline(ctx.skyboxPipeline);
-  pass.setBindGroup(0, ctx.device.createBindGroup({
-    layout: ctx.skyboxPipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
-  }));
-  pass.setBindGroup(1, ctx.device.createBindGroup({
-    layout: ctx.skyboxPipeline.getBindGroupLayout(1),
-    entries: [
-      { binding: 0, resource: ctx.cubemap.view },
-      { binding: 1, resource: ctx.cubemapSampler },
-    ],
-  }));
-  pass.setVertexBuffer(0, ctx.skyboxVertexBuffer);
-  pass.setIndexBuffer(ctx.skyboxIndexBuffer, 'uint32');
-  pass.drawIndexed(SKYBOX_INDICES.length);
+  // Skybox background (cubemap mode only)
+  if (!isGrid) {
+    pass.setPipeline(ctx.skyboxPipeline);
+    pass.setBindGroup(0, ctx.device.createBindGroup({
+      layout: ctx.skyboxPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
+    }));
+    pass.setBindGroup(1, ctx.device.createBindGroup({
+      layout: ctx.skyboxPipeline.getBindGroupLayout(1),
+      entries: [
+        { binding: 0, resource: ctx.cubemap.view },
+        { binding: 1, resource: ctx.cubemapSampler },
+      ],
+    }));
+    pass.setVertexBuffer(0, ctx.skyboxVertexBuffer);
+    pass.setIndexBuffer(ctx.skyboxIndexBuffer, 'uint32');
+    pass.drawIndexed(SKYBOX_INDICES.length);
+  }
 
   pass.end();
   ctx.device.queue.submit([encoder.finish()]);
@@ -590,6 +595,11 @@ export function drawBody(ctx: RenderContext, viewProj: Float32Array): void {
   rowMajorToColumnMajor(viewProjColMajor, viewProj);
   ctx.device.queue.writeBuffer(ctx.viewProjBuffer, 0, viewProjColMajor);
 
+  const isGrid = ctx.backgroundMode === 'grid';
+  const clearColor = isGrid
+    ? { r: 0.45, g: 0.45, b: 0.45, a: 1 }
+    : { r: 0.1, g: 0.1, b: 0.15, a: 1 };
+
   ensureMainDepth(ctx);
   const view = ctx.context.getCurrentTexture().createView();
   const encoder = ctx.device.createCommandEncoder();
@@ -597,7 +607,7 @@ export function drawBody(ctx: RenderContext, viewProj: Float32Array): void {
     colorAttachments: [
       {
         view,
-        clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 },
+        clearValue: clearColor,
         loadOp: ctx.cubemap && ctx.mainDepthView ? 'load' : 'clear',
         storeOp: 'store',
       },
@@ -611,29 +621,43 @@ export function drawBody(ctx: RenderContext, viewProj: Float32Array): void {
         }
       : undefined,
   });
-  pass.setPipeline(ctx.bodyPipeline);
-  pass.setBindGroup(
-    0,
-    ctx.device.createBindGroup({
-      layout: ctx.bodyPipeline.getBindGroupLayout(0),
+
+  // Ground: 3D grid in grid mode, IBL-shaded plane in cubemap mode
+  if (isGrid) {
+    pass.setPipeline(ctx.gridPipeline);
+    pass.setBindGroup(0, ctx.device.createBindGroup({
+      layout: ctx.gridPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
+    }));
+    pass.draw(6, 1, 0, 0);
+  } else {
+    pass.setPipeline(ctx.bodyPipeline);
+    pass.setBindGroup(
+      0,
+      ctx.device.createBindGroup({
+        layout: ctx.bodyPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: ctx.viewProjBuffer } },
+          { binding: 1, resource: { buffer: ctx.groundColorBuffer } },
+        ],
+      })
+    );
+    pass.setBindGroup(1, ctx.device.createBindGroup({
+      layout: ctx.bodyPipeline.getBindGroupLayout(1),
       entries: [
-        { binding: 0, resource: { buffer: ctx.viewProjBuffer } },
-        { binding: 1, resource: { buffer: ctx.groundColorBuffer } },
+        { binding: 0, resource: ctx.cubemap.view },
+        { binding: 1, resource: ctx.cubemapSampler },
+        { binding: 2, resource: { buffer: ctx.groundPbrBuffer } },
       ],
-    })
-  );
-  pass.setBindGroup(1, ctx.device.createBindGroup({
-    layout: ctx.bodyPipeline.getBindGroupLayout(1),
-    entries: [
-      { binding: 0, resource: ctx.cubemap.view },
-      { binding: 1, resource: ctx.cubemapSampler },
-      { binding: 2, resource: { buffer: ctx.pbrParamsBuffer } },
-    ],
-  }));
-  pass.setVertexBuffer(0, ctx.groundVertexBuffer);
-  pass.setVertexBuffer(1, ctx.groundNormalBuffer);
-  pass.setIndexBuffer(ctx.groundIndexBuffer, 'uint32');
-  pass.drawIndexed(6);
+    }));
+    pass.setVertexBuffer(0, ctx.groundVertexBuffer);
+    pass.setVertexBuffer(1, ctx.groundNormalBuffer);
+    pass.setIndexBuffer(ctx.groundIndexBuffer, 'uint32');
+    pass.drawIndexed(6);
+  }
+
+  // Body (mannequin)
+  pass.setPipeline(ctx.bodyPipeline);
   pass.setBindGroup(
     0,
     ctx.device.createBindGroup({
@@ -644,62 +668,18 @@ export function drawBody(ctx: RenderContext, viewProj: Float32Array): void {
       ],
     })
   );
+  pass.setBindGroup(1, ctx.device.createBindGroup({
+    layout: ctx.bodyPipeline.getBindGroupLayout(1),
+    entries: [
+      { binding: 0, resource: ctx.cubemap.view },
+      { binding: 1, resource: ctx.cubemapSampler },
+      { binding: 2, resource: { buffer: ctx.bodyPbrBuffer } },
+    ],
+  }));
   pass.setVertexBuffer(0, ctx.bodyVertexBuffer);
   pass.setVertexBuffer(1, ctx.bodyNormalBuffer);
   pass.setIndexBuffer(ctx.bodyIndexBuffer, 'uint32');
   pass.drawIndexed(ctx.bodyNumIndices);
-  pass.end();
-  ctx.device.queue.submit([encoder.finish()]);
-}
-
-/**
- * Draw cloth. Copies positions from sim, then draws. viewProj from camera (row-major); we pass column-major to WGSL.
- * Call after drawBody so cloth appears in front of the mannequin.
- */
-export function drawCloth(
-  ctx: RenderContext,
-  viewProj: Float32Array,
-  positionBuffer: GPUBuffer,
-  positionBufferSize: number
-): void {
-  const viewProjColMajor = new Float32Array(16);
-  rowMajorToColumnMajor(viewProjColMajor, viewProj);
-  ctx.device.queue.writeBuffer(ctx.viewProjBuffer, 0, viewProjColMajor);
-
-  const view = ctx.context.getCurrentTexture().createView();
-  const encoder = ctx.device.createCommandEncoder();
-  encoder.copyBufferToBuffer(positionBuffer, 0, ctx.vertexBuffer, 0, positionBufferSize);
-  const pass = encoder.beginRenderPass({
-    colorAttachments: [
-      {
-        view,
-        loadOp: 'load',
-        storeOp: 'store',
-      },
-    ],
-  });
-  pass.setPipeline(ctx.pipeline);
-  pass.setBindGroup(
-    0,
-    ctx.device.createBindGroup({
-      layout: ctx.pipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: ctx.viewProjBuffer } }],
-    })
-  );
-  pass.setBindGroup(
-    1,
-    ctx.device.createBindGroup({
-      layout: ctx.pipeline.getBindGroupLayout(1),
-      entries: [
-        { binding: 0, resource: ctx.cubemap.view },
-        { binding: 1, resource: ctx.cubemapSampler },
-        { binding: 2, resource: { buffer: ctx.pbrParamsBuffer } },
-      ],
-    })
-  );
-  pass.setVertexBuffer(0, ctx.vertexBuffer);
-  pass.setIndexBuffer(ctx.indexBuffer, 'uint32');
-  pass.drawIndexed(ctx.numIndices);
   pass.end();
   ctx.device.queue.submit([encoder.finish()]);
 }
@@ -720,21 +700,80 @@ export async function updateCubemap(
     newCubemap = createFallbackCubemap(ctx.device);
   }
 
-  // Save old cubemap to destroy after swap
   const oldCubemap = ctx.cubemap;
-  // Atomically swap to new cubemap
   ctx.cubemap = newCubemap;
-  // Destroy old texture (now safe since new cubemap is assigned)
+  ctx.backgroundMode = 'cubemap';
   oldCubemap.texture.destroy();
 }
 
-export function updatePBRParams(
-  ctx: RenderContext,
-  roughness: number,
-  metallic: number,
-  ambientStrength: number,
-  reflectionStrength: number
-): void {
-  const pbrParams = new Float32Array([roughness, metallic, ambientStrength, reflectionStrength]);
-  ctx.device.queue.writeBuffer(ctx.pbrParamsBuffer, 0, pbrParams);
+/** Switch background to white + grid; uses white cubemap for IBL. */
+export function setBackgroundGrid(ctx: RenderContext): void {
+  if (ctx.backgroundMode === 'grid') return;
+  const oldCubemap = ctx.cubemap;
+  ctx.cubemap = createWhiteCubemap(ctx.device);
+  ctx.backgroundMode = 'grid';
+  oldCubemap.texture.destroy();
 }
+
+/**
+ * Draw 3D cloth over the existing frame using loadOp:'load' so the body pass
+ * is preserved.  Call AFTER drawMainPass().
+ *
+ * cloth.colorBuffer must contain vec4f(albedo, opacity).
+ * cloth.pbrBuffer   must contain PBRParams with current camera position
+ *                   (call cloth.updateCameraPos() before this).
+ */
+export function drawCloth3D(ctx: RenderContext, cloth: Cloth3DRenderData): void {
+  ensureMainDepth(ctx);
+  if (!ctx.mainDepthView) return;
+
+  // viewProjBuffer is already up-to-date from drawMainPass — no re-write needed.
+  const view = ctx.context.getCurrentTexture().createView();
+  const encoder = ctx.device.createCommandEncoder({ label: 'cloth3d-render' });
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{
+      view,
+      loadOp:  'load',   // preserve the existing body render
+      storeOp: 'store',
+    }],
+    depthStencilAttachment: {
+      view:              ctx.mainDepthView,
+      depthLoadOp:  'load',   // preserve body depth so cloth occludes correctly
+      depthStoreOp: 'store',
+      depthClearValue: 1,
+    },
+  });
+
+  pass.setPipeline(ctx.clothPipeline);
+
+  // Group 0: viewProj + cloth color + grid info (UV computation)
+  pass.setBindGroup(0, ctx.device.createBindGroup({
+    layout: ctx.clothPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: ctx.viewProjBuffer } },
+      { binding: 1, resource: { buffer: cloth.colorBuffer } },
+      { binding: 2, resource: { buffer: cloth.gridInfoBuffer } },
+    ],
+  }));
+
+  // Group 1: cubemap + sampler + cloth PBR + albedo texture
+  pass.setBindGroup(1, ctx.device.createBindGroup({
+    layout: ctx.clothPipeline.getBindGroupLayout(1),
+    entries: [
+      { binding: 0, resource: ctx.cubemap.view },
+      { binding: 1, resource: ctx.cubemapSampler },
+      { binding: 2, resource: { buffer: cloth.pbrBuffer } },
+      { binding: 3, resource: cloth.albedoTextureView },
+      { binding: 4, resource: cloth.albedoSamplerObj },
+    ],
+  }));
+
+  pass.setVertexBuffer(0, cloth.posBuffer);
+  pass.setVertexBuffer(1, cloth.normalBuffer);
+  pass.setIndexBuffer(cloth.indexBuffer, 'uint32');
+  pass.drawIndexed(cloth.numIndices);
+  pass.end();
+
+  ctx.device.queue.submit([encoder.finish()]);
+}
+

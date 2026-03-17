@@ -5,7 +5,6 @@ Electron desktop app for cloth simulation (draping, fit validation, material beh
 ## Setup
 
 - Node.js 18+
-- (Optional) Emscripten for C++ WASM: `npm run build:wasm` builds the native cloth builder; the app works without it via a TypeScript fallback.
 
 ```bash
 npm install
@@ -19,14 +18,13 @@ npm install
 ## Build
 
 - **Renderer + main + preload**: `npm run build` (output in `out/`).
-- **WASM (optional)**: `npm run build:wasm` — requires Emscripten; copies `cloth_sim_native.js` and `cloth_sim_native.wasm` to `public/`.
 - **Desktop installers**: `npm run dist` — runs build then electron-builder (Windows NSIS, macOS DMG, Linux AppImage). Output in `release/`. On macOS, code signing can be disabled for local builds via `build.mac.forceCodeSigning: false` in package.json.
 
 ## Test
 
 - **Unit tests**: `npm run test` (Vitest).
 - **Watch mode**: `npm run test:watch`.
-- Tests live in `tests/`: `params.test.ts` (params/presets), `cloth.test.ts` (grid cloth building). Add a new test file in `tests/` when adding features.
+- Tests live in `tests/`. Add a new test file in `tests/` when adding features.
 
 ## Lint
 
@@ -54,7 +52,7 @@ python export_neutral_mannequin.py
 
 - **Architecture**: `docs/architecture.md` — modules, data flow, buffer layout, where to change what.
 - **i18n**: `docs/i18n.md` — locale files, key convention, adding a language.
-- **Native/WASM**: `native/README.md` — C++ build and buffer layout.
+- **Archived native/WASM**: `tmp/archive/native/README.md` — C++ WASM build (not used by the app; cloth is built in TS). Kept in tmp for reference.
 
 ## Preload API (Electron)
 

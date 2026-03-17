@@ -1,7 +1,12 @@
 [
   "tshirt.json",
   "skirt.json",
-  "scarf.json",
+  "dress.json",
+  "mini_dress.json",
   "tank.json",
-  "hood.json"
+  "hood.json",
+  "scarf.json",
+  "culottes.json",
+  "vest.json",
+  "jacket.json"
 ]

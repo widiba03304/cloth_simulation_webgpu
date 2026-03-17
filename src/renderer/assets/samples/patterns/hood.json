@@ -1,6 +1,1 @@
-{
-  "id": "hood",
-  "name": "Hood / Cape",
-  "grid": { "rows": 16, "cols": 20, "spacing": 1.0 },
-  "pinned": "topRow"
-}
+{"id":"hood","name":"Hood / Cape","grid":{"rows":16,"cols":20,"spacing":0.03},"pinned":"topRow"}

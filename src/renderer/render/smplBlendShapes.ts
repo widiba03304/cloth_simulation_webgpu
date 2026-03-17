@@ -138,7 +138,7 @@ export function computeSMPLScaleParams(positions: Float32Array): {
   }
 
   const spanY = maxY - minY || 1;
-  const targetHeight = 1.2;
+  const targetHeight = 1.73; // Matches capsule/cloth coordinate system (head top ~1.73m)
   const scale = targetHeight / spanY;
   const cx = (minX + maxX) / 2;
   const cz = (minZ + maxZ) / 2;

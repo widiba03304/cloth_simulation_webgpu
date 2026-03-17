@@ -1,22 +1,16 @@
 /**
- * Renderer entry: wires WebGPU, simulation, render, camera, and UI.
+ * Renderer entry: wires WebGPU, simulation, appCtx.render, appCtx.camera, and UI.
+ * Two views: Dashboard (project list) and Editor (3D viewport).
  */
 
 import { initI18n, t } from './i18n';
 import { requestGPUContext, reconfigureCanvas, type GPUContext } from './webgpu/device';
-import { buildClothFromSamplePattern } from './simulation/cloth';
-import {
-  createSimulation,
-  stepSimulation,
-  getClothVertexBuffer,
-  resetSimulation,
-  type SimulationContext,
-} from './simulation/compute';
-import { getParamsForPreset } from './simulation/params';
-import type { SimulationParams } from './types/simulation';
-import type { ClothData } from './types/simulation';
-import { createRenderPipeline, drawMainPass, updateBodyMesh, updateCubemap, type RenderContext } from './render/pipeline';
-import { loadSMPLMannequins, type BodyMesh } from './render/bodyMesh';
+import { createRenderPipeline, drawMainPass, drawCloth3D, updateBodyMesh, updateCubemap, setBackgroundGrid, type RenderContext } from './render/pipeline';
+import type { Cloth3DInstance } from './sim/cloth3d/cloth3d';
+import { getClothMaterialParams, rgbToHex } from './data/materials';
+import { buildCloth } from './managers/clothManager';
+import type { MaskPatternLayer } from './sim/cloth3d/cloth3d.mask';
+import { loadSMPLMannequins, getPelvisTarget, type BodyMesh } from './render/bodyMesh';
 import {
   loadSMPLShapeData,
   applySMPLBlendShapesScaled,
@@ -26,49 +20,94 @@ import {
   type SMPLBetas,
   type SMPLShapeData,
 } from './render/smplBlendShapes';
-import { createOrbitCamera, updateCamera, type OrbitCamera } from './render/camera';
-import { loadKeymap, saveKeymap, getDefaultKeymap } from './input/keymap';
+import { createOrbitCamera, updateCamera, applyCameraPreset, type OrbitCamera, type CameraPreset } from './render/camera';
+import { loadKeymap, getDefaultKeymap } from './input/keymap';
 import { attachCameraInput } from './input/cameraInput';
-import { createControlsPanel } from './ui/controls';
-import { updateCollisionParams, destroyBodyCollision } from './collision/bodyCollide';
 import { createGimbalElement, updateGimbal } from './ui/gimbal';
 import { createTargetIndicatorElement, updateTargetIndicator } from './ui/targetIndicator';
-import { SAMPLE_PATTERNS } from './samples/patterns';
-import { SAMPLE_MATERIALS } from './samples/materials';
-import { loadSMPLPoseData, getPoseData, getIKJointIndices } from './render/smplPoseData';
-import { IKController } from './ik/ikController';
-import { IKInputHandler } from './input/ikInput';
-import { IKHandleRenderer } from './ui/ikHandles';
-import { TranslationGizmo } from './ui/translationGizmo';
-import { RotationGizmo } from './ui/rotationGizmo';
+import { loadSMPLPoseData } from './render/smplPoseData';
+import { initIK, reinitIK, cleanupIK, type IKResources } from './managers/ikManager';
+import { createDashboard, updateProjectList, updateRecentList, type Project, type DashboardItem, type RecentItem } from './ui/dashboard';
+import { createWorkspace, type WorkspaceInstance, type WorkspacePane, type PaneEditorType } from './ui/workspace';
+import { resolveSceneForEditor } from './scene';
+import { createPatternEditor, type PatternData } from './ui/patternEditor';
+import { createMaterialEditor, type MaterialData } from './ui/materialEditor';
+import { ctx as appCtx } from './app/context';
+
+interface ElectronAPI {
+  openFile: () => Promise<string | null>;
+  saveFile: (defaultPath: string, data: string | Buffer) => Promise<string | null>;
+  showSaveDialog: (options: { defaultPath?: string }) => Promise<string | null>;
+  saveScreenshot: (base64Data: string) => Promise<string | null>;
+  saveProject: (path: string, json: string) => Promise<boolean>;
+  loadProject: (path: string) => Promise<string>;
+  getAppPath: () => Promise<string>;
+  listProjects: () => Promise<Project[]>;
+  createProject: (name: string) => Promise<Project>;
+  updateProject: (project: Project) => Promise<Project>;
+  deleteProject: (id: string) => Promise<boolean>;
+  listPatterns: () => Promise<DashboardItem[]>;
+  createPattern: (name: string) => Promise<DashboardItem>;
+  updatePattern: (item: DashboardItem) => Promise<DashboardItem>;
+  deletePattern: (id: string) => Promise<boolean>;
+  listMaterials: () => Promise<DashboardItem[]>;
+  createMaterial: (name: string) => Promise<DashboardItem>;
+  updateMaterial: (item: DashboardItem) => Promise<DashboardItem>;
+  deleteMaterial: (id: string) => Promise<boolean>;
+  onScreenshotSetView?: (cb: (view: string) => void) => void;
+  screenshotViewReady?: (view: string) => Promise<void>;
+  screenshotRendererReady?: () => Promise<void>;
+}
+
+function getElectron(): ElectronAPI | null {
+  return (window as unknown as { electron?: ElectronAPI }).electron ?? null;
+}
+
+function captureCanvasThumbnail(source: HTMLCanvasElement): string | null {
+  try {
+    // Card preview: ~200-250px wide x 120px tall → use 2x for retina
+    const tw = 480;
+    const th = 240;
+    const tmp = document.createElement('canvas');
+    tmp.width = tw;
+    tmp.height = th;
+    const c2d = tmp.getContext('2d');
+    if (!c2d) return null;
+
+    // Fill background
+    c2d.fillStyle = '#1a1a1a';
+    c2d.fillRect(0, 0, tw, th);
+
+    // Fit source preserving aspect ratio (center crop)
+    const srcAspect = source.width / source.height;
+    const dstAspect = tw / th;
+    let sw = source.width;
+    let sh = source.height;
+    let sx = 0;
+    let sy = 0;
+    if (srcAspect < dstAspect) {
+      sh = source.width / dstAspect;
+      sy = (source.height - sh) / 2;
+    } else {
+      sw = source.height * dstAspect;
+      sx = (source.width - sw) / 2;
+    }
+    c2d.drawImage(source, sx, sy, sw, sh, 0, 0, tw, th);
+    return tmp.toDataURL('image/jpeg', 0.85);
+  } catch {
+    return null;
+  }
+}
 
 const app = document.getElementById('app')!;
 const canvas = app.querySelector('#canvas') as HTMLCanvasElement;
 let gimbalCanvas: HTMLCanvasElement | null = null;
 let targetIndicatorCanvas: HTMLCanvasElement | null = null;
 
-let gpu: GPUContext | null = null;
-let sim: SimulationContext | null = null;
-let render: RenderContext | null = null;
-let camera: OrbitCamera | null = null;
-let running = true;
-let pageVisible = true; // false when tab/window hidden (Page Visibility API)
-let lastTime = 0;
-let accum = 0;
-const DT = 1 / 60;
-
-let currentClothData: ClothData | null = null;
-let currentParams: SimulationParams = getParamsForPreset(SAMPLE_MATERIALS[0].presetKey);
-let patternIndex = 0;
-let materialIndex = 0;
 let avatarIndex = 0;
 let bodyMeshes: [BodyMesh, BodyMesh] | null = null;  // Scaled meshes for rendering
 let bodyMeshesOriginal: [BodyMesh, BodyMesh] | null = null;
-let bodyMeshesUnscaled: [Float32Array, Float32Array] | null = null;  // Unscaled meshes for IK joint computation
-let motionIndex = 0;
-let motionLoop = true;
-let motionTime = 0;
-const MOTION_DURATION = 2; // seconds, for future animation clips
+let bodyMeshesUnscaled: [Float32Array, Float32Array] | null = null;
 let fpsFrameCount = 0;
 let fpsLastTime = 0;
 let fpsValue = 0;
@@ -79,23 +118,67 @@ let smplBetas: SMPLBetas = {
 };
 let smplShapeDataLoaded = false;
 
-// PBR state (kept in sync with UI, written to GPU each frame)
-let pbrRoughness = 0.5;
-let pbrMetallic = 0.1;
-let pbrAmbientStrength = 0.5;
-let pbrReflectionStrength = 0.22;
-
 // IK system
-let ikController: IKController | null = null;
-let ikInputHandler: IKInputHandler | null = null;
-let ikHandleRenderer: IKHandleRenderer | null = null;
+let ikResources: IKResources | null = null;
 let ikEnabled = false;
-let ikHandleCanvas: HTMLCanvasElement | null = null;
-let translationGizmo: TranslationGizmo | null = null;
-let translationGizmoCanvas: HTMLCanvasElement | null = null;
-let rotationGizmo: RotationGizmo | null = null;
-let rotationGizmoCanvas: HTMLCanvasElement | null = null;
 let smplPoseDataLoaded = false;
+
+// 3D cloth simulation
+let turntableEnabled = false;
+let simFrozen = true;  // starts paused; user presses Play in toolbar to begin
+let currentSize = 'M';
+
+// Currently loaded albedo texture (tracked so we can destroy it on clear/replace)
+let albedoTexture: GPUTexture | null = null;
+
+let keymap = getDefaultKeymap();
+let cameraInputDetach: (() => void) | null = null;
+let currentSubSteps = 8;
+
+// Colorway: optional albedo override (set by color picker, cleared when material changes)
+let currentAlbedoOverride: [number, number, number] | null = null;
+
+/** Overrides from a user-edited PatternData (rows/cols/spacing/pinned override fixed configs). */
+let activePatternGrid: { rows: number; cols: number; spacing: number; pinned?: string } | null = null;
+/** Active pattern layer used for outline masking (neckline/armhole cutouts). */
+let activePatternLayer: MaskPatternLayer | null = null;
+
+async function resetCloth(patternId: string, materialId: string): Promise<void> {
+  if (!appCtx.gpu) return;
+
+  // Show loading overlay before the blocking GPU/CPU work.
+  // Animate the bar to 80% with a slow ease so the user sees progress.
+  showLoading();
+  setLoadingProgress(0, 'Building cloth…');
+  const bar = document.getElementById('loading-bar');
+  if (bar) bar.style.transition = 'width 1.6s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+
+  // Yield two animation frames so the browser paints the overlay before JS blocks.
+  await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+  setLoadingProgress(80);
+
+  appCtx.cloth3d = await buildCloth(appCtx.gpu.device, appCtx.cloth3d ?? null, {
+    patternId, size: currentSize, materialId,
+    albedoOverride: currentAlbedoOverride,
+    activePatternGrid, activePatternLayer,
+    bodyMesh: bodyMeshes?.[avatarIndex],
+  });
+
+  // Snap to 100% then hide.
+  if (bar) bar.style.transition = 'width 0.15s ease';
+  setLoadingProgress(100, 'Done');
+  await new Promise<void>(r => setTimeout(r, 160));
+  hideLoading();
+}
+
+// View state
+let editorRunning = false;
+let editorAnimFrameId = 0;
+let currentProject: Project | null = null;
+let dashboardEl: HTMLElement | null = null;
+let workspaceInstance: WorkspaceInstance | null = null;
+const paneCleanups = new Map<string, () => void>();
+let editorUIElements: HTMLElement[] = []; // panel, toggleBtn, gimbal, back btn — for cleanup
 
 function onResize(): void {
   const dpr = Math.min(window.devicePixelRatio ?? 1, 2);
@@ -108,25 +191,21 @@ function onResize(): void {
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
-    if (gpu?.context) {
-      reconfigureCanvas(canvas, gpu.device).then((ctx) => {
-        if (ctx && gpu) (gpu as GPUContext).context = ctx;
+    if (appCtx.gpu?.context) {
+      reconfigureCanvas(canvas, appCtx.gpu.device).then((ctx) => {
+        if (ctx && appCtx.gpu) (appCtx.gpu as GPUContext).context = ctx;
       });
     }
-    if (camera) {
-      camera.aspect = w / h;
-      updateCamera(camera);
+    if (appCtx.camera) {
+      appCtx.camera.aspect = w / h;
+      updateCamera(appCtx.camera);
     }
   }
 }
 
-async function rebuildSimulation(): Promise<void> {
-  if (!gpu) return;
-  const pattern = SAMPLE_PATTERNS[patternIndex];
-  const { cloth, pinned } = await buildClothFromSamplePattern(pattern);
-  currentClothData = cloth;
+async function loadBodyAndCreateRender(): Promise<void> {
+  if (!appCtx.gpu) return;
 
-  // Load SMPL shape data if not already loaded
   if (!smplShapeDataLoaded) {
     const { male, female } = await loadSMPLShapeData();
     smplShapeDataLoaded = true;
@@ -153,473 +232,112 @@ async function rebuildSimulation(): Promise<void> {
     bodyMeshes = [bodyMeshesOriginal[0], bodyMeshesOriginal[1]];
     bodyMeshesUnscaled = null;  // No unscaled data for OBJ meshes
   }
-  const bodyMesh = bodyMeshes[avatarIndex];
+  const bodyMesh = bodyMeshes![avatarIndex];
 
-  // Clean up body collision before destroying simulation buffers
-  destroyBodyCollision();
-
-  if (sim) {
+  if (appCtx.render) {
     try {
-      sim.positionBuffers[0].destroy();
-      sim.positionBuffers[1].destroy();
-      sim.prevPositionBuffers[0].destroy();
-      sim.prevPositionBuffers[1].destroy();
-      sim.pinnedBuffer.destroy();
-      sim.structuralBuffer.destroy();
-      sim.shearBuffer.destroy();
-      sim.bendBuffer.destroy();
-      sim.paramsUniform.destroy();
-      sim.constraintUniform.destroy();
-      sim.bendUniform.destroy();
+      appCtx.render.viewProjBuffer.destroy();
+      appCtx.render.bodyVertexBuffer.destroy();
+      appCtx.render.bodyNormalBuffer.destroy();
+      appCtx.render.bodyIndexBuffer.destroy();
+      appCtx.render.bodyColorBuffer.destroy();
+      // Note: GPURenderPipeline has no destroy() method in the WebGPU spec.
+      appCtx.render.groundVertexBuffer.destroy();
+      appCtx.render.groundNormalBuffer.destroy();
+      appCtx.render.groundIndexBuffer.destroy();
+      appCtx.render.groundColorBuffer.destroy();
+      appCtx.render.cubemap?.texture.destroy();
+      appCtx.render.skyboxVertexBuffer.destroy();
+      appCtx.render.skyboxIndexBuffer.destroy();
+      appCtx.render.mainDepthTexture?.destroy();
     } catch {
       // ignore
     }
   }
 
-  // Create simulation with body mesh for collision
-  sim = await createSimulation(gpu.device, cloth, currentParams, pinned, bodyMesh);
-
-  if (render) {
-    try {
-      render.viewProjBuffer.destroy();
-      render.vertexBuffer.destroy();
-      render.indexBuffer.destroy();
-      render.pipeline.destroy();
-      render.bodyVertexBuffer.destroy();
-      render.bodyNormalBuffer.destroy();
-      render.bodyIndexBuffer.destroy();
-      render.bodyColorBuffer.destroy();
-      render.bodyPipeline.destroy();
-      render.groundVertexBuffer.destroy();
-      render.groundNormalBuffer.destroy();
-      render.groundIndexBuffer.destroy();
-      render.groundColorBuffer.destroy();
-      render.cubemap?.texture.destroy();
-      render.skyboxPipeline.destroy();
-      render.skyboxVertexBuffer.destroy();
-      render.skyboxIndexBuffer.destroy();
-      render.mainDepthTexture?.destroy();
-    } catch {
-      // ignore
-    }
-  }
-
-  render = await createRenderPipeline(
-    gpu.device,
-    gpu.context,
-    gpu.format,
-    cloth.mesh.numVertices,
-    cloth.mesh.indices,
-    bodyMesh
-  );
+  appCtx.render = await createRenderPipeline(appCtx.gpu.device, appCtx.gpu.context, appCtx.gpu.format, bodyMesh);
 }
 
-async function init(): Promise<void> {
-  await initI18n();
+async function initEditor(): Promise<void> {
+  setLoadingProgress(0, 'Loading…');
+  setLoadingProgress(5, 'Initializing…');
 
-  gpu = await requestGPUContext(canvas);
-  if (!gpu) {
+  appCtx.gpu = await requestGPUContext(canvas);
+  if (!appCtx.gpu) {
+    hideLoading();
     app.innerHTML = `<p style="color:#fff;padding:2rem;font-family:sans-serif">${t('errors.webgpu')}</p>`;
     return;
   }
-  gpu.device.lost.then((info: { reason: string; message: string }) => {
+  setLoadingProgress(25, 'WebGPU ready');
+  appCtx.gpu.device.lost.then((info: { reason: string; message: string }) => {
     console.error('WebGPU device lost:', info.reason, info.message);
   });
 
   onResize();
+  setLoadingProgress(30, 'Loading body…');
 
-  await rebuildSimulation();
-  if (!camera) {
-    camera = createOrbitCamera(3, [0, 0, 0]);
+  await loadBodyAndCreateRender();
+  setLoadingProgress(70, 'Setting up scene…');
+  const bodyMesh = bodyMeshes?.[avatarIndex];
+  const cameraTargetPelvis: [number, number, number] = bodyMesh
+    ? getPelvisTarget(bodyMesh.positions)
+    : [0, 0.5, 0];
+  if (!appCtx.camera) {
+    appCtx.camera = createOrbitCamera(3, cameraTargetPelvis);
     const w = canvas.width || 1;
     const h = canvas.height || 1;
-    camera.aspect = w / h;
-    updateCamera(camera);
+    appCtx.camera.aspect = w / h;
+    updateCamera(appCtx.camera);
   }
 
   // Load SMPL pose data for IK
   if (!smplPoseDataLoaded) {
+    setLoadingProgress(72, 'Loading pose data…');
     const { male, female } = await loadSMPLPoseData();
     smplPoseDataLoaded = true;
+    setLoadingProgress(82, 'Pose data loaded');
     console.log('SMPL pose data loaded:', { male: !!male, female: !!female });
 
-    // Initialize IK system if pose data is available
-    const poseData = getPoseData(avatarIndex === 0 ? 'male' : 'female');
-    if (poseData && bodyMeshes && camera) {
-      const baseMesh = bodyMeshes[avatarIndex];
+    // Initialize IK system
+    if (bodyMeshes && appCtx.camera) {
       const unscaledMesh = bodyMeshesUnscaled ? bodyMeshesUnscaled[avatarIndex] : undefined;
-
-      // Create IK controller with GPU device (required) and unscaled mesh for accurate joint computation
-      ikController = new IKController(poseData, baseMesh, gpu.device, unscaledMesh);
-
-      // Set enabled joints (wrists, ankles, elbows, knees)
-      const enabledJoints = getIKJointIndices();
-      ikController.setEnabledJoints(enabledJoints);
-
-      // Note: GPU skinning is only applied when IK is enabled and actively used
-      // The original mesh is rendered until the user manipulates joints
-
-      // Create IK input handler
-      ikInputHandler = new IKInputHandler(ikController, camera, canvas);
-
-      // Create translation gizmo
-      translationGizmo = new TranslationGizmo(canvas, camera, ikController);
-      translationGizmoCanvas = translationGizmo.getCanvas();
-      app.appendChild(translationGizmoCanvas);
-
-      // Create rotation gizmo
-      rotationGizmo = new RotationGizmo(canvas, camera, ikController);
-      rotationGizmoCanvas = rotationGizmo.getCanvas();
-      app.appendChild(rotationGizmoCanvas);
-
-      // Set up callbacks for gizmo activation
-      ikInputHandler.setCallbacks({
-        onDragStart: (jointId: number) => {
-          if (translationGizmo) {
-            translationGizmo.setActiveJoint(jointId);
-          }
-          if (rotationGizmo) {
-            rotationGizmo.setActiveJoint(jointId);
-          }
-        },
-        onDragEnd: (jointId: number) => {
-          // Keep gizmo active after drag ends
-          // User can click elsewhere to deactivate
-        },
-      });
-
-      // Create IK handle renderer
-      ikHandleRenderer = new IKHandleRenderer(canvas, camera, ikController, ikInputHandler);
-      ikHandleRenderer.setJointStyles(enabledJoints);
-
-      // Add handle canvas to DOM
-      ikHandleCanvas = ikHandleRenderer.getCanvas();
-      app.appendChild(ikHandleCanvas);
-
-      console.log('IK system initialized');
+      ikResources = initIK(appCtx.gpu.device, bodyMeshes[avatarIndex], unscaledMesh, avatarIndex, canvas, appCtx.camera, app);
+      if (ikResources) {
+        console.log('IK system initialized');
+        setLoadingProgress(92, 'IK ready');
+      }
     }
   }
 
-  let keymap = loadKeymap();
-  let cameraInputDetach: (() => void) | null = null;
-  if (camera) cameraInputDetach = attachCameraInput(canvas, keymap, camera, ikInputHandler || undefined, translationGizmo || undefined, rotationGizmo || undefined);
+  setLoadingProgress(94, 'Setting up controls…');
+  keymap = loadKeymap();
+  if (appCtx.camera) cameraInputDetach = attachCameraInput(canvas, keymap, appCtx.camera, ikResources?.inputHandler, ikResources?.translationGizmo, ikResources?.rotationGizmo);
 
-  const panel = createControlsPanel({
-    onPatternChange: async (i) => {
-      patternIndex = i;
-      await rebuildSimulation();
-    },
-    onMaterialChange: (i) => {
-      materialIndex = i;
-      currentParams = getParamsForPreset(SAMPLE_MATERIALS[i].presetKey);
-    },
-    onAvatarChange: (i) => {
-      avatarIndex = i;
-      if (render && bodyMeshes) {
-        updateBodyMesh(render, bodyMeshes[i]);
-
-        // Reinitialize IK controller with new avatar's mesh
-        if (ikController && ikInputHandler && ikHandleRenderer && bodyMeshesUnscaled && camera) {
-          const poseData = getPoseData(avatarIndex === 0 ? 'male' : 'female');
-          if (poseData) {
-            const wasEnabled = ikEnabled;
-            ikEnabled = false;
-
-            if (gpu) {
-              ikController = new IKController(poseData, bodyMeshes[i], gpu.device, bodyMeshesUnscaled[i]);
-            }
-            const enabledJoints = getIKJointIndices();
-            ikController.setEnabledJoints(enabledJoints);
-
-            ikInputHandler = new IKInputHandler(ikController, camera, canvas);
-
-            // Recreate translation gizmo
-            if (translationGizmo) {
-              translationGizmo.dispose();
-            }
-            translationGizmo = new TranslationGizmo(canvas, camera, ikController);
-            if (translationGizmoCanvas) {
-              translationGizmoCanvas.remove();
-            }
-            translationGizmoCanvas = translationGizmo.getCanvas();
-            app.appendChild(translationGizmoCanvas);
-
-            // Recreate rotation gizmo
-            if (rotationGizmo) {
-              rotationGizmo.dispose();
-            }
-            rotationGizmo = new RotationGizmo(canvas, camera, ikController);
-            if (rotationGizmoCanvas) {
-              rotationGizmoCanvas.remove();
-            }
-            rotationGizmoCanvas = rotationGizmo.getCanvas();
-            app.appendChild(rotationGizmoCanvas);
-
-            // Set up gizmo callbacks
-            ikInputHandler.setCallbacks({
-              onDragStart: (jointId: number) => {
-                if (translationGizmo) {
-                  translationGizmo.setActiveJoint(jointId);
-                }
-                if (rotationGizmo) {
-                  rotationGizmo.setActiveJoint(jointId);
-                }
-              },
-              onDragEnd: () => {},
-            });
-
-            // Recreate IK handle renderer
-            if (ikHandleCanvas) {
-              ikHandleCanvas.remove();
-            }
-            ikHandleRenderer = new IKHandleRenderer(canvas, camera, ikController, ikInputHandler);
-            ikHandleRenderer.setJointStyles(enabledJoints);
-            ikHandleCanvas = ikHandleRenderer.getCanvas();
-            app.appendChild(ikHandleCanvas);
-
-            // Reattach camera input with new IK handler
-            if (cameraInputDetach) {
-              cameraInputDetach();
-            }
-            cameraInputDetach = attachCameraInput(canvas, keymap, camera, ikInputHandler, translationGizmo, rotationGizmo);
-
-            ikEnabled = wasEnabled;
-            ikController.setEnabled(ikEnabled);
-
-            console.log('IK controller reinitialized for new avatar');
-          }
-        }
-      }
-    },
-    onSMPLBetasChange: (betas: SMPLBetas) => {
-      smplBetas = betas;
-      const maleData = getShapeData('male');
-      const femaleData = getShapeData('female');
-
-      if (maleData && femaleData) {
-        // Use real SMPL blend shapes with unscaled versions for IK
-        const maleResult = applySMPLBlendShapesWithUnscaled(maleData, betasToArray(smplBetas));
-        const femaleResult = applySMPLBlendShapesWithUnscaled(femaleData, betasToArray(smplBetas));
-
-        bodyMeshes = [maleResult.scaled, femaleResult.scaled];
-        bodyMeshesUnscaled = [maleResult.unscaled, femaleResult.unscaled];
-
-        if (render) updateBodyMesh(render, bodyMeshes[avatarIndex]);
-
-        // Reinitialize IK controller with new mesh shape
-        if (ikController && ikInputHandler && ikHandleRenderer && camera) {
-          const poseData = getPoseData(avatarIndex === 0 ? 'male' : 'female');
-          if (poseData) {
-            const wasEnabled = ikEnabled;
-            ikEnabled = false;
-
-            if (gpu) {
-              ikController = new IKController(poseData, bodyMeshes[avatarIndex], gpu.device, bodyMeshesUnscaled[avatarIndex]);
-            }
-            const enabledJoints = getIKJointIndices();
-            ikController.setEnabledJoints(enabledJoints);
-
-            ikInputHandler = new IKInputHandler(ikController, camera, canvas);
-
-            // Recreate translation gizmo
-            if (translationGizmo) {
-              translationGizmo.dispose();
-            }
-            translationGizmo = new TranslationGizmo(canvas, camera, ikController);
-            if (translationGizmoCanvas) {
-              translationGizmoCanvas.remove();
-            }
-            translationGizmoCanvas = translationGizmo.getCanvas();
-            app.appendChild(translationGizmoCanvas);
-
-            // Recreate rotation gizmo
-            if (rotationGizmo) {
-              rotationGizmo.dispose();
-            }
-            rotationGizmo = new RotationGizmo(canvas, camera, ikController);
-            if (rotationGizmoCanvas) {
-              rotationGizmoCanvas.remove();
-            }
-            rotationGizmoCanvas = rotationGizmo.getCanvas();
-            app.appendChild(rotationGizmoCanvas);
-
-            // Set up gizmo callbacks
-            ikInputHandler.setCallbacks({
-              onDragStart: (jointId: number) => {
-                if (translationGizmo) {
-                  translationGizmo.setActiveJoint(jointId);
-                }
-                if (rotationGizmo) {
-                  rotationGizmo.setActiveJoint(jointId);
-                }
-              },
-              onDragEnd: () => {},
-            });
-
-            // Recreate IK handle renderer
-            if (ikHandleCanvas) {
-              ikHandleCanvas.remove();
-            }
-            ikHandleRenderer = new IKHandleRenderer(canvas, camera, ikController, ikInputHandler);
-            ikHandleRenderer.setJointStyles(enabledJoints);
-            ikHandleCanvas = ikHandleRenderer.getCanvas();
-            app.appendChild(ikHandleCanvas);
-
-            // Reattach camera input with new IK handler
-            if (cameraInputDetach) {
-              cameraInputDetach();
-            }
-            cameraInputDetach = attachCameraInput(canvas, keymap, camera, ikInputHandler, translationGizmo, rotationGizmo);
-
-            ikEnabled = wasEnabled;
-            ikController.setEnabled(ikEnabled);
-
-            console.log('IK controller reinitialized with new body shape');
-          }
-        }
-      }
-    },
-    onMotionChange: (i) => {
-      motionIndex = i;
-      motionTime = 0;
-    },
-    onIterationsChange: (n) => {
-      currentParams.iterations = Math.max(2, Math.min(10, n));
-    },
-    onToggleIK: (enabled: boolean) => {
-      ikEnabled = enabled;
-      if (ikController) {
-        ikController.setEnabled(enabled);
-        console.log(`IK ${enabled ? 'enabled' : 'disabled'}`);
-        console.log(`  ikController: ${!!ikController}, ikInputHandler: ${!!ikInputHandler}, ikHandleRenderer: ${!!ikHandleRenderer}, translationGizmo: ${!!translationGizmo}`);
-      } else {
-        console.warn('IK controller not initialized yet. SMPL pose data may still be loading.');
-      }
-    },
-    onResetIK: () => {
-      if (ikController) {
-        ikController.reset();
-        console.log('IK pose reset');
-      }
-    },
-    onCollisionParamsChange: (friction, restitution, thickness) => {
-      if (gpu) {
-        updateCollisionParams(gpu.device, friction, restitution, thickness);
-        console.log('[Collision] Updated params:', { friction, restitution, thickness });
-      }
-    },
-    onPlayPause: () => {
-      running = !running;
-    },
-    onLoopChange: (loop) => {
-      motionLoop = loop;
-    },
-    onReset: () => {
-      if (sim && currentClothData) {
-        resetSimulation(sim, currentClothData.mesh.positions);
-      }
-    },
-    onResetKeymap: () => {
-      saveKeymap(getDefaultKeymap());
-      keymap = loadKeymap();
-      cameraInputDetach?.();
-      if (camera) cameraInputDetach = attachCameraInput(canvas, keymap, camera, ikInputHandler || undefined, translationGizmo || undefined, rotationGizmo || undefined);
-    },
-    onCubemapChange: async (cubemapName: string) => {
-      if (render) {
-        await updateCubemap(render, cubemapName);
-      }
-    },
-    onPBRParamsChange: (roughness, metallic, ambientStrength, reflectionStrength) => {
-      pbrRoughness = roughness;
-      pbrMetallic = metallic;
-      pbrAmbientStrength = ambientStrength;
-      pbrReflectionStrength = reflectionStrength;
-    },
-    getKeymap: () => keymap,
-    ...(typeof (window as unknown as { electron?: { saveScreenshot?: (b: string) => Promise<string | null> } }).electron !== 'undefined' && {
-      onExport: async () => {
-        const el = (window as unknown as { electron?: { saveScreenshot: (b: string) => Promise<string | null> } }).electron;
-        if (!el?.saveScreenshot || !canvas) return;
-        try {
-          const dataUrl = canvas.toDataURL('image/png');
-          const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1]! : dataUrl;
-          await el.saveScreenshot(base64);
-        } catch (e) {
-          console.error('Export screenshot failed', e);
-        }
-      },
-      onSaveProject: async () => {
-        const el = (window as unknown as { electron?: { showSaveDialog: (o: object) => Promise<string | null>; saveProject: (p: string, j: string) => Promise<boolean> } }).electron;
-        if (!el?.showSaveDialog || !el?.saveProject) return;
-        const path = await el.showSaveDialog({ defaultPath: 'project.json' });
-        if (!path) return;
-        const state = { patternIndex, materialIndex, motionIndex, motionLoop };
-        await el.saveProject(path, JSON.stringify(state));
-      },
-      onOpenProject: async () => {
-        const el = (window as unknown as { electron?: { openFile: () => Promise<string | null>; loadProject: (p: string) => Promise<string> } }).electron;
-        if (!el?.openFile || !el?.loadProject) return;
-        const path = await el.openFile();
-        if (!path) return;
-        try {
-          const json = await el.loadProject(path);
-          const state = JSON.parse(json) as { patternIndex?: number; materialIndex?: number; motionIndex?: number; motionLoop?: boolean };
-          if (typeof state.patternIndex === 'number') patternIndex = Math.max(0, Math.min(state.patternIndex, SAMPLE_PATTERNS.length - 1));
-          if (typeof state.materialIndex === 'number') materialIndex = Math.max(0, Math.min(state.materialIndex, SAMPLE_MATERIALS.length - 1));
-          if (typeof state.motionIndex === 'number') motionIndex = state.motionIndex;
-          if (typeof state.motionLoop === 'boolean') motionLoop = state.motionLoop;
-          currentParams = getParamsForPreset(SAMPLE_MATERIALS[materialIndex].presetKey);
-          await rebuildSimulation();
-          const patternSelect = document.getElementById('pattern-select') as HTMLSelectElement | null;
-          const materialSelect = document.getElementById('material-select') as HTMLSelectElement | null;
-          const motionSelect = document.getElementById('motion-select') as HTMLSelectElement | null;
-          if (patternSelect) patternSelect.value = String(patternIndex);
-          if (materialSelect) materialSelect.value = String(materialIndex);
-          if (motionSelect) motionSelect.value = String(motionIndex);
-        } catch (e) {
-          console.error('Load project failed', e);
-        }
-      },
-    }),
-  });
-  app.appendChild(panel);
-
-  // Add toggle button for panel
-  const toggleButton = (panel as HTMLElement & { toggleButton: HTMLElement }).toggleButton;
-  if (toggleButton) {
-    app.appendChild(toggleButton);
-  }
 
   gimbalCanvas = createGimbalElement();
   app.appendChild(gimbalCanvas);
+  editorUIElements.push(gimbalCanvas);
 
   targetIndicatorCanvas = createTargetIndicatorElement(canvas);
 
-  const setStats = (panel as HTMLElement & { setStats: (fps: number, particles: number) => void }).setStats;
-  if (setStats) {
-    (window as unknown as { setStatsFn: (f: number, p: number) => void }).setStatsFn = setStats;
-  }
 
+  // ── Initialize 3D cloth simulation ─────────────────────────────────────────
+  setLoadingProgress(96, 'Loading cloth sim…');
+  const initPatternId  = currentProject?.patternId  ?? 'tshirt';
+  const initMaterialId = currentProject?.materialId ?? 'cotton';
+  await resetCloth(initPatternId, initMaterialId);
+
+  setLoadingProgress(100, 'Ready');
   onResize();
 }
 
 function loop(t: number): void {
-  requestAnimationFrame(loop);
-  if (!gpu || !sim || !render || !camera) return;
+  if (!editorRunning) return;
+  editorAnimFrameId = requestAnimationFrame(loop);
+  if (!appCtx.gpu || !appCtx.render || !appCtx.camera) return;
   if (canvas.width === 0 || canvas.height === 0) {
     onResize();
     return;
-  }
-
-  const elapsed = (t - lastTime) / 1000 || 0;
-  lastTime = t;
-  accum += elapsed;
-  while (accum >= DT && running && pageVisible) {
-    stepSimulation(sim, currentParams);
-    accum -= DT;
-    motionTime += DT;
-    if (motionLoop && motionTime >= MOTION_DURATION) motionTime = 0;
   }
 
   fpsFrameCount++;
@@ -628,89 +346,517 @@ function loop(t: number): void {
     fpsFrameCount = 0;
     fpsLastTime = t;
   }
-  const setStatsFn = (window as unknown as { setStatsFn?: (fps: number, p: number) => void }).setStatsFn;
-  if (setStatsFn) setStatsFn(fpsValue, sim.numVertices);
+  workspaceInstance?.updateStatus(fpsValue, 0, currentSubSteps, 'simulate');
 
-  updateCamera(camera);
-  // Update IK system if enabled and actively dragging
-  // Check ikController, ikInputHandler, and gizmos
-  const ikControllerDragging = ikController ? ikController.isDragging() : false;
-  const ikInputHandlerDragging = ikInputHandler ? ikInputHandler.isDragging() : false;
-  const translationGizmoDragging = translationGizmo ? translationGizmo.isDragging() : false;
-  const rotationGizmoDragging = rotationGizmo ? rotationGizmo.isDragging() : false;
+  updateCamera(appCtx.camera);
+  const ikControllerDragging = ikResources?.controller.isDragging() ?? false;
+  const ikInputHandlerDragging = ikResources?.inputHandler.isDragging() ?? false;
+  const translationGizmoDragging = ikResources?.translationGizmo.isDragging() ?? false;
+  const rotationGizmoDragging = ikResources?.rotationGizmo.isDragging() ?? false;
 
-  if (ikEnabled && ikController && (ikControllerDragging || ikInputHandlerDragging || translationGizmoDragging || rotationGizmoDragging)) {
-    console.log('[MAIN] Render loop - IK dragging detected - ikController:', ikControllerDragging, 'ikInputHandler:', ikInputHandlerDragging);
-
+  if (ikEnabled && ikResources && (ikControllerDragging || ikInputHandlerDragging || translationGizmoDragging || rotationGizmoDragging)) {
     try {
-      console.log('[MAIN] Using GPU skinning');
-      // GPU skinning: compute and copy in single command encoder for proper synchronization
-      const commandEncoder = render.device.createCommandEncoder({
-        label: 'IK Skinning Encoder',
-      });
-
-      ikController.computeAndCopyGPUSkinning(
+      const commandEncoder = appCtx.render.device.createCommandEncoder({ label: 'IK Skinning Encoder' });
+      ikResources.controller.computeAndCopyGPUSkinning(
         commandEncoder,
-        render.bodyVertexBuffer,
-        render.bodyNormalBuffer
+        appCtx.render.bodyVertexBuffer,
+        appCtx.render.bodyNormalBuffer
       );
-
-      render.device.queue.submit([commandEncoder.finish()]);
-      console.log('[MAIN] GPU skinning completed');
+      appCtx.render.device.queue.submit([commandEncoder.finish()]);
     } catch (error) {
       console.error('[Main] IK skinning error:', error);
-      // Disable IK on error to prevent further issues
       ikEnabled = false;
-      if (ikController) ikController.setEnabled(false);
+      ikResources.controller.setEnabled(false);
     }
   }
 
-  const posBuffer = getClothVertexBuffer(sim);
-  const posSize = sim.numVertices * 3 * 4;
-  const pivot = camera.orbitPivot ?? camera.target;
-  const sinT = Math.sin(camera.theta);
-  const cosT = Math.cos(camera.theta);
-  const sinP = Math.sin(camera.phi);
-  const cosP = Math.cos(camera.phi);
+  const pivot = appCtx.camera.orbitPivot ?? appCtx.camera.target;
+  const sinT = Math.sin(appCtx.camera.theta);
+  const cosT = Math.cos(appCtx.camera.theta);
+  const sinP = Math.sin(appCtx.camera.phi);
+  const cosP = Math.cos(appCtx.camera.phi);
   const cameraEye: [number, number, number] = [
-    pivot[0] + camera.distance * cosP * sinT,
-    pivot[1] + camera.distance * sinP,
-    pivot[2] + camera.distance * cosP * cosT,
+    pivot[0] + appCtx.camera.distance * cosP * sinT,
+    pivot[1] + appCtx.camera.distance * sinP,
+    pivot[2] + appCtx.camera.distance * cosP * cosT,
   ];
-  drawMainPass(render, camera.viewProj, posBuffer, posSize, cameraEye, {
-    roughness: pbrRoughness,
-    metallic: pbrMetallic,
-    ambientStrength: pbrAmbientStrength,
-    reflectionStrength: pbrReflectionStrength,
-  });
-
-  // Always render IK handles (will clear canvas if disabled)
-  if (ikHandleRenderer) {
-    ikHandleRenderer.render();
+  // ── Turntable auto-rotation ────────────────────────────────────────────────
+  if (turntableEnabled) {
+    appCtx.camera.theta += 0.005;
+    updateCamera(appCtx.camera);
   }
 
-  // Render translation gizmo
-  if (translationGizmo) {
-    translationGizmo.render();
+  // ── IK → cloth capsule sync (update collision bodies from live pose) ────────
+  if (appCtx.cloth3d && ikResources && ikEnabled) {
+    appCtx.cloth3d.updateCapsulesFromJoints(
+      ikResources.controller.skeleton.joints.map(j => j.worldPosition as readonly [number, number, number])
+    );
   }
 
-  // Render rotation gizmo
-  if (rotationGizmo) {
-    rotationGizmo.render();
+  // ── 3D cloth: physics step ─────────────────────────────────────────────────
+  if (appCtx.cloth3d && !simFrozen) {
+    appCtx.cloth3d.step();
+    // Update draping overlay
+    const drapingEl = document.getElementById('draping-overlay') as HTMLElement | null;
+    if (drapingEl) {
+      if (appCtx.cloth3d.isDraping) {
+        const pct = Math.round(appCtx.cloth3d.drapingProgress * 100);
+        drapingEl.textContent = `Draping… ${pct}%`;
+        drapingEl.style.display = 'block';
+      } else {
+        drapingEl.style.display = 'none';
+      }
+    }
   }
 
-  if (gimbalCanvas) updateGimbal(gimbalCanvas, camera);
-  if (targetIndicatorCanvas) updateTargetIndicator(targetIndicatorCanvas, canvas, camera);
+  drawMainPass(appCtx.render, appCtx.camera.viewProj, cameraEye);
+
+  // ── 3D cloth: render over body ─────────────────────────────────────────────────────
+  if (appCtx.cloth3d) {
+    appCtx.cloth3d.updateCameraPos(cameraEye);
+    drawCloth3D(appCtx.render, appCtx.cloth3d);
+  }
+
+  ikResources?.handleRenderer.render();
+  ikResources?.translationGizmo.render();
+  ikResources?.rotationGizmo.render();
+
+  if (gimbalCanvas) updateGimbal(gimbalCanvas, appCtx.camera);
+  if (targetIndicatorCanvas) updateTargetIndicator(targetIndicatorCanvas, canvas, appCtx.camera);
 }
 
-document.addEventListener('visibilitychange', () => {
-  pageVisible = document.visibilityState === 'visible';
-});
 window.addEventListener('resize', onResize);
-init().then(() => requestAnimationFrame(loop)).catch((err) => {
-  console.error('Init failed:', err);
-  const msg = document.createElement('p');
-  msg.style.cssText = 'color:#f44;padding:2rem;font-family:monospace;white-space:pre-wrap';
-  msg.textContent = `Init failed:\n${err?.message ?? err}\n\n${err?.stack ?? ''}`;
-  app.appendChild(msg);
+function setLoadingProgress(percent: number, message?: string): void {
+  const wrap = document.querySelector('#loading [role="progressbar"]');
+  const bar = document.getElementById('loading-bar');
+  const pctEl = document.getElementById('loading-pct');
+  const textEl = document.getElementById('loading-text');
+  const pct = Math.min(100, Math.max(0, Math.round(percent)));
+  if (wrap) wrap.setAttribute('aria-valuenow', String(pct));
+  if (bar) bar.style.width = `${pct}%`;
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  if (textEl && message !== undefined) textEl.textContent = message;
+}
+
+function showLoading(): void {
+  const loading = document.getElementById('loading');
+  if (loading) {
+    loading.classList.remove('hidden');
+    setLoadingProgress(0, 'Loading…');
+  }
+}
+
+function hideLoading(): void {
+  const loading = document.getElementById('loading');
+  if (loading) loading.classList.add('hidden');
+}
+
+// --- Dashboard & Navigation ---
+
+async function refreshDashboard(): Promise<void> {
+  if (!dashboardEl) return;
+  const el = getElectron();
+  const projects = el ? (await el.listProjects()) as Project[] : [];
+  updateProjectList(dashboardEl, projects, dashboardCallbacks);
+  const recentItems: RecentItem[] = projects.map((p) => ({
+    id: p.id, name: p.name, updatedAt: p.updatedAt, thumbnail: p.thumbnail,
+  }));
+  updateRecentList(dashboardEl, recentItems, dashboardCallbacks);
+}
+
+const dashboardCallbacks = {
+  onOpenProject: (project: Project) => {
+    currentProject = project;
+    const resolved = resolveSceneForEditor(project);
+    avatarIndex = resolved.avatarIndex;
+    navigateTo('workspace', project);
+  },
+  onCreateProject: async () => {
+    const el = getElectron();
+    if (!el) return;
+    const project = await el.createProject(t('dash.untitledAvatar')) as Project;
+    currentProject = project;
+    const resolved = resolveSceneForEditor(project);
+    avatarIndex = resolved.avatarIndex;
+    navigateTo('workspace', project);
+  },
+  onDeleteProject: async (project: Project) => {
+    const el = getElectron();
+    if (!el) return;
+    await el.deleteProject(project.id);
+    await refreshDashboard();
+  },
+  onRenameProject: async (project: Project, newName: string) => {
+    const el = getElectron();
+    if (!el) return;
+    await el.updateProject({ ...project, name: newName });
+    await refreshDashboard();
+  },
+};
+
+function cleanupEditor(): void {
+  editorRunning = false;
+  if (editorAnimFrameId) {
+    cancelAnimationFrame(editorAnimFrameId);
+    editorAnimFrameId = 0;
+  }
+  // Remove editor UI elements (panel, toggleBtn, gimbal, backBtn)
+  for (const el of editorUIElements) {
+    el.remove();
+  }
+  editorUIElements = [];
+  // Remove IK overlays
+  cleanupIK(ikResources);
+  ikResources = null;
+  ikEnabled = false;
+  if (targetIndicatorCanvas) { targetIndicatorCanvas.remove(); targetIndicatorCanvas = null; }
+  gimbalCanvas = null;
+  appCtx.camera = null;
+  smplPoseDataLoaded = false;
+  appCtx.cloth3d?.destroy();
+  appCtx.cloth3d = null;
+  albedoTexture?.destroy();
+  albedoTexture = null;
+  currentAlbedoOverride = null;
+  turntableEnabled = false;
+  simFrozen = true;  // reset to paused; Play button in toolbar reflects this
+  currentSize = 'M';
+}
+
+function hideAllViews(): void {
+  // Cleanup workspace pane editors
+  for (const cleanup of paneCleanups.values()) cleanup();
+  paneCleanups.clear();
+  if (workspaceInstance) { workspaceInstance.destroy(); workspaceInstance = null; }
+
+  // Restore #app to body if it was moved into a pane
+  if (app.parentElement !== document.body) document.body.appendChild(app);
+
+  cleanupEditor();
+  app.classList.add('hidden');
+  hideLoading();
+  if (dashboardEl) dashboardEl.classList.add('hidden');
+}
+
+// --- Workspace pane lifecycle ---
+
+async function mountPaneEditor(pane: WorkspacePane, project: Project): Promise<void> {
+  if (pane.type === 'simulation') {
+    app.classList.remove('hidden');
+    pane.contentEl.appendChild(app);
+    if (!appCtx.gpu) {
+      showLoading();
+      try {
+        await initEditor();
+        hideLoading();
+        editorRunning = true;
+        editorAnimFrameId = requestAnimationFrame(loop);
+      } catch (err: unknown) {
+        console.error('Workspace simulation init failed:', err);
+        hideLoading();
+      }
+    } else if (!editorRunning) {
+      editorRunning = true;
+      editorAnimFrameId = requestAnimationFrame(loop);
+    }
+    paneCleanups.set(pane.id, () => { /* simulation cleanup in unmountPaneEditor */ });
+
+  } else if (pane.type === 'pattern') {
+    const el = getElectron();
+    let patternData: PatternData;
+
+    if (project.patternId && el) {
+      const items = await el.listPatterns() as DashboardItem[];
+      const found = items.find(i => i.id === project.patternId);
+      patternData = found
+        ? { ...found, grid: (found as unknown as PatternData).grid ?? { rows: 20, cols: 12, spacing: 0.03 }, pinned: (found as unknown as PatternData).pinned ?? 'topRow' }
+        : { id: 'default', name: 'Pattern', createdAt: Date.now(), updatedAt: Date.now(), grid: { rows: 20, cols: 12, spacing: 0.03 }, pinned: 'topRow' };
+    } else if (el) {
+      const item = await el.createPattern(t('dash.untitledPattern'));
+      patternData = { ...item, grid: { rows: 20, cols: 12, spacing: 0.03 }, pinned: 'topRow' };
+      await el.updatePattern(patternData as unknown as DashboardItem);
+      project.patternId = item.id;
+      await el.updateProject(project);
+      if (currentProject) currentProject.patternId = item.id;
+    } else {
+      patternData = { id: 'default', name: 'Pattern', createdAt: Date.now(), updatedAt: Date.now(), grid: { rows: 20, cols: 12, spacing: 0.03 }, pinned: 'topRow' };
+    }
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const editorEl = createPatternEditor(patternData, {
+      onChange: (updated) => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(async () => {
+          if (!updated.grid) return;
+          activePatternGrid = { rows: updated.grid.rows, cols: updated.grid.cols, spacing: updated.grid.spacing, pinned: updated.pinned };
+          if (updated.layers?.length) {
+            const layerId = updated.activeLayerId;
+            activePatternLayer = (layerId ? updated.layers.find(l => l.id === layerId) : updated.layers[0]) ?? null;
+          } else {
+            activePatternLayer = null;
+          }
+          await resetCloth(updated.id ?? currentProject?.patternId ?? 'tshirt', currentProject?.materialId ?? 'cotton');
+        }, 600);
+      },
+      onSave: async (updated) => {
+        const elec = getElectron();
+        if (elec) await elec.updatePattern(updated as unknown as DashboardItem);
+      },
+      onBack: () => navigateTo('dashboard'),
+    });
+    pane.contentEl.appendChild(editorEl);
+    paneCleanups.set(pane.id, () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      editorEl.remove();
+    });
+
+  } else if (pane.type === 'material') {
+    const el = getElectron();
+    let materialData: MaterialData;
+
+    if (project.materialId && el) {
+      const items = await el.listMaterials() as DashboardItem[];
+      const found = items.find(i => i.id === project.materialId);
+      materialData = found
+        ? { ...found, albedo: (found as unknown as MaterialData).albedo ?? [0.9, 0.9, 0.9], roughness: (found as unknown as MaterialData).roughness ?? 0.5 } as unknown as MaterialData
+        : { id: 'default', name: 'Material', createdAt: Date.now(), updatedAt: Date.now(), albedo: [0.9, 0.9, 0.9], roughness: 0.5 } as unknown as MaterialData;
+    } else if (el) {
+      const item = await el.createMaterial(t('dash.untitledMaterial'));
+      materialData = { ...item, albedo: [0.9, 0.9, 0.9] as [number, number, number], roughness: 0.5 } as unknown as MaterialData;
+      await el.updateMaterial(materialData as unknown as DashboardItem);
+      project.materialId = item.id;
+      await el.updateProject(project);
+      if (currentProject) currentProject.materialId = item.id;
+    } else {
+      materialData = { id: 'default', name: 'Material', createdAt: Date.now(), updatedAt: Date.now(), albedo: [0.9, 0.9, 0.9], roughness: 0.5 } as unknown as MaterialData;
+    }
+
+    const editorEl = createMaterialEditor(materialData, {
+      onSave: async (updated) => {
+        const elec = getElectron();
+        if (elec) await elec.updateMaterial(updated as unknown as DashboardItem);
+        await resetCloth(currentProject?.patternId ?? 'tshirt', updated.id ?? currentProject?.materialId ?? 'cotton');
+      },
+      onBack: () => navigateTo('dashboard'),
+    });
+    pane.contentEl.appendChild(editorEl);
+    paneCleanups.set(pane.id, () => { editorEl.remove(); });
+  }
+}
+
+function unmountPaneEditor(paneId: string, type: PaneEditorType): void {
+  paneCleanups.get(paneId)?.();
+  paneCleanups.delete(paneId);
+  if (type === 'simulation') {
+    cleanupEditor();
+    if (app.parentElement !== document.body) document.body.appendChild(app);
+    app.classList.add('hidden');
+  }
+}
+
+async function navigateTo(view: 'dashboard' | 'workspace', data?: unknown): Promise<void> {
+  if (view === 'dashboard') {
+    hideAllViews();
+    if (dashboardEl) {
+      dashboardEl.classList.remove('hidden');
+      await refreshDashboard();
+    }
+  } else if (view === 'workspace') {
+    hideAllViews();
+    const project = data as Project;
+    workspaceInstance = createWorkspace(project.name, ['simulation'], {
+      // ── Navigation ────────────────────────────────────────────────────────────
+      onBack: async () => {
+        if (currentProject && canvas) {
+          try {
+            const thumb = captureCanvasThumbnail(canvas);
+            if (thumb) { currentProject.thumbnail = thumb; const el = getElectron(); if (el) await el.updateProject(currentProject); }
+          } catch { /* ignore */ }
+        }
+        void navigateTo('dashboard');
+      },
+      onSave: async () => {
+        if (!currentProject) return;
+        const el = getElectron();
+        if (!el) return;
+        if (canvas) {
+          try { const thumb = captureCanvasThumbnail(canvas); if (thumb) currentProject.thumbnail = thumb; } catch { /* ignore */ }
+        }
+        await el.updateProject(currentProject);
+      },
+      onModeChange: (_mode) => { /* mode system: future */ },
+      // ── Object tab ───────────────────────────────────────────────────────────
+      onAvatarChange: (i) => {
+        avatarIndex = i;
+        if (currentProject) { currentProject.avatarIndex = i; const el = getElectron(); if (el) el.updateProject(currentProject); }
+        if (appCtx.render && bodyMeshes) {
+          updateBodyMesh(appCtx.render, bodyMeshes[i]);
+          if (ikResources && bodyMeshesUnscaled && appCtx.camera && appCtx.gpu) {
+            const wasEnabled = ikEnabled;
+            ikEnabled = false;
+            const newIk = reinitIK(ikResources, appCtx.gpu.device, bodyMeshes[i], bodyMeshesUnscaled[i], i, canvas, appCtx.camera, app);
+            if (newIk) {
+              ikResources = newIk;
+              if (cameraInputDetach) cameraInputDetach();
+              cameraInputDetach = attachCameraInput(canvas, keymap, appCtx.camera, ikResources.inputHandler, ikResources.translationGizmo, ikResources.rotationGizmo);
+              ikEnabled = wasEnabled;
+              ikResources.controller.setEnabled(ikEnabled);
+            }
+          }
+        }
+      },
+      onPatternChange: async (patternId) => {
+        if (!currentProject) return;
+        currentProject.patternId = patternId;
+        const el = getElectron();
+        if (el) await el.updateProject(currentProject);
+        activePatternGrid = null;
+        activePatternLayer = null;
+        await resetCloth(patternId, currentProject.materialId ?? 'cotton');
+      },
+      onCubemapChange: async (cubemapName) => {
+        if (!appCtx.render) return;
+        if (cubemapName === 'grid') {
+          setBackgroundGrid(appCtx.render);
+        } else {
+          await updateCubemap(appCtx.render, cubemapName);
+        }
+      },
+      onSizeChange: async (size) => {
+        currentSize = size;
+        await resetCloth(currentProject?.patternId ?? 'tshirt', currentProject?.materialId ?? 'cotton');
+      },
+      // ── Material tab ─────────────────────────────────────────────────────────
+      onMaterialChange: async (materialId) => {
+        if (!currentProject) return;
+        currentProject.materialId = materialId;
+        const el = getElectron();
+        if (el) await el.updateProject(currentProject);
+        currentAlbedoOverride = null;
+        const newParams = getClothMaterialParams(materialId, null);
+        workspaceInstance?.setPropertyColor(rgbToHex(...newParams.albedo));
+        if (appCtx.cloth3d) appCtx.cloth3d.updateMaterialParams(newParams);
+      },
+      onColorChange: (albedo) => {
+        currentAlbedoOverride = albedo;
+        if (appCtx.cloth3d) appCtx.cloth3d.updateMaterialParams(getClothMaterialParams(currentProject?.materialId ?? 'cotton', albedo));
+      },
+      onTextureLoad: async (file) => {
+        if (!appCtx.cloth3d || !appCtx.gpu) return;
+        try {
+          const bitmap = await createImageBitmap(file);
+          const newTex = appCtx.gpu.device.createTexture({
+            size: [bitmap.width, bitmap.height, 1], format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+          });
+          appCtx.gpu.device.queue.copyExternalImageToTexture({ source: bitmap }, { texture: newTex }, [bitmap.width, bitmap.height]);
+          bitmap.close();
+          const sampler = appCtx.gpu.device.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' });
+          albedoTexture?.destroy(); albedoTexture = newTex;
+          appCtx.cloth3d.setAlbedoTexture(newTex, sampler);
+        } catch (e) { console.error('Texture upload failed', e); }
+      },
+      onClearTexture: () => { appCtx.cloth3d?.clearAlbedoTexture(); albedoTexture?.destroy(); albedoTexture = null; },
+      // ── Physics tab ──────────────────────────────────────────────────────────
+      onFreezeToggle: (frozen) => { simFrozen = frozen; },
+      onWindChange: (strength, angle) => {
+        if (!appCtx.cloth3d) return;
+        const rad = angle * (Math.PI / 180);
+        appCtx.cloth3d.setWind([Math.cos(rad), 0, Math.sin(rad)], strength * 0.2);
+      },
+      onQualityChange: (quality) => {
+        if (!appCtx.cloth3d) return;
+        const presets: Record<string, [number, number]> = { low: [2, 2], medium: [4, 4], high: [8, 8] };
+        const [ss, ci] = presets[quality]!;
+        currentSubSteps = ss;
+        appCtx.cloth3d.setQuality(ss, ci);
+      },
+      onResetCloth: () => { appCtx.cloth3d?.reset(); },
+      // ── View tab ─────────────────────────────────────────────────────────────
+      onCameraPreset: (preset) => { if (!appCtx.camera) return; applyCameraPreset(appCtx.camera, preset); updateCamera(appCtx.camera); },
+      onOrthoToggle: (enabled) => {
+        if (!appCtx.camera) return;
+        appCtx.camera.orthographic = enabled;
+        if (enabled) appCtx.camera.orthoScale = appCtx.camera.distance * Math.tan(appCtx.camera.fov / 2);
+        updateCamera(appCtx.camera);
+      },
+      onTurntableToggle: (enabled) => { turntableEnabled = enabled; },
+      onExportOBJ: async () => {
+        if (!appCtx.cloth3d) return;
+        const el = getElectron();
+        if (!el) return;
+        try {
+          const obj = await appCtx.cloth3d.exportMeshOBJ();
+          await el.saveFile(`${currentProject?.patternId ?? 'cloth'}_drape.obj`, obj);
+        } catch (e) { console.error('OBJ export failed', e); }
+      },
+      // ── Pane lifecycle ───────────────────────────────────────────────────────
+      onPaneAdded: (pane) => { void mountPaneEditor(pane, project); },
+      onPaneRemoved: (paneId, type) => unmountPaneEditor(paneId, type),
+      onPaneTypeChange: (paneId, oldType, newType) => {
+        unmountPaneEditor(paneId, oldType);
+        const pane = workspaceInstance!.getPanes().find(p => p.id === paneId);
+        if (pane) void mountPaneEditor(pane, project);
+      },
+    });
+    document.body.appendChild(workspaceInstance.element);
+    for (const pane of workspaceInstance.getPanes()) {
+      await mountPaneEditor(pane, project);
+    }
+  }
+}
+
+// --- Boot ---
+
+async function boot(): Promise<void> {
+  await initI18n();
+
+  dashboardEl = createDashboard(dashboardCallbacks);
+  document.body.appendChild(dashboardEl);
+
+  const autoParams  = new URLSearchParams(location.search);
+  const autoView    = autoParams.get('auto');
+  const autoPattern = autoParams.get('pattern'); // e.g. ?auto=editor&pattern=skirt
+  if (autoView === 'editor') {
+    const autoFrozen = autoParams.get('frozen') === '1'; // --frozen: capture before-play state
+    if (!currentProject) {
+      currentProject = { id: 'screenshot', name: 'Screenshot', createdAt: 0, updatedAt: 0, avatarIndex: 0 };
+    }
+    await navigateTo('workspace', currentProject);
+    // Override pattern from URL param (used by --pattern=X screenshot flag)
+    if (autoPattern) {
+      activePatternGrid = null;    // use sample config for the named pattern
+      activePatternLayer = null;
+      if (currentProject) currentProject.patternId = autoPattern;
+      const sel = document.getElementById('pattern-select') as HTMLSelectElement | null;
+      if (sel) sel.value = autoPattern;
+      await resetCloth(autoPattern, currentProject?.materialId ?? 'denim');
+    }
+    // Start simulation unless frozen mode (for before-play screenshots)
+    if (!autoFrozen) simFrozen = false;
+    // Reset appCtx.camera to front view for consistent screenshots
+    if (appCtx.camera) { applyCameraPreset(appCtx.camera, 'front'); updateCamera(appCtx.camera); }
+    // Multi-view screenshot IPC: main sends 'set-view', renderer switches + replies 'view-ready'
+    const el = getElectron();
+    el?.onScreenshotSetView?.((view: string) => {
+      if (appCtx.camera) {
+        if (view === 'front45') {
+          appCtx.camera.theta = -Math.PI / 4; appCtx.camera.phi = 0.25;
+        } else {
+          applyCameraPreset(appCtx.camera, view as import('./render/appCtx.camera').CameraPreset);
+        }
+        updateCamera(appCtx.camera);
+      }
+      requestAnimationFrame(() => requestAnimationFrame(() => void el.screenshotViewReady?.(view)));
+    });
+    // Signal main process that renderer is ready — main will then wait SCREENSHOT_DELAY_MS
+    // for simulation warmup before starting the capture loop.
+    void el?.screenshotRendererReady?.();
+  } else {
+    await refreshDashboard();
+  }
+}
+
+boot().catch((err) => {
+  console.error('Boot failed:', err);
 });

@@ -4,6 +4,9 @@ node_modules/
 # Build / output
 out/
 dist/
+
+# Moved unused files (archive, old dist, etc.); safe to delete after verifying app works
+tmp/
 *.tsbuildinfo
 
 # Vite / Electron
@@ -40,6 +43,9 @@ coverage/
 # native/*.js
 # public/*.wasm
 # public/*.js
+
+# OMC agent state (ephemeral; do not commit)
+.omc/
 
 # Large assets (add locally; see README)
 smpl/models/*.pkl

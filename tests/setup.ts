@@ -1,13 +1,8 @@
 /**
- * Test setup for GPU Skinning tests
- * Initializes WebGPU environment for testing
+ * Global test setup: installs WebGPU mock, DOMMatrix, createImageBitmap, etc.
+ * Runs in every test environment (node + jsdom).
  */
+import { installWebGPUMock } from './mocks/webgpu';
 
-// Mock WebGPU if not available (for CI/CD environments)
-if (typeof navigator === 'undefined') {
-  (global as any).navigator = {
-    gpu: undefined,
-  };
-}
-
-// You can add additional setup here
+// Install WebGPU mock globally (navigator.gpu, DOMMatrix, createImageBitmap)
+installWebGPUMock();

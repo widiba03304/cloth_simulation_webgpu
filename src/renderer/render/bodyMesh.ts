@@ -41,7 +41,7 @@ function scaleAndCenterSMPL(positions: Float32Array): Float32Array {
     maxZ = Math.max(maxZ, z);
   }
   const spanY = maxY - minY || 1;
-  const targetHeight = 1.2;
+  const targetHeight = 1.73; // Matches capsule/cloth coordinate system (head top ~1.73m)
   const scale = targetHeight / spanY;
   const cx = (minX + maxX) / 2;
   const cz = (minZ + maxZ) / 2;
@@ -171,6 +171,32 @@ export function buildMannequinMesh(): BodyMesh {
     indices: indicesArray,
     normals,
   } as BodyMesh;
+}
+
+/**
+ * Compute pelvis position from body mesh (AABB center XZ, height ~35% from feet).
+ * Use as camera orbit target so the view is centered on the mannequin pelvis.
+ */
+export function getPelvisTarget(positions: Float32Array): [number, number, number] {
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i]!;
+    const y = positions[i + 1]!;
+    const z = positions[i + 2]!;
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+    minZ = Math.min(minZ, z);
+    maxZ = Math.max(maxZ, z);
+  }
+  const height = maxY - minY || 1;
+  const pelvisY = minY + 0.35 * height; // Pelvis ~35% up from feet
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  return [cx, pelvisY, cz];
 }
 
 /**

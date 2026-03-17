@@ -36,6 +36,25 @@ export interface OrbitCamera {
   fov: number;
   near: number;
   far: number;
+  /** When true, use orthographic projection instead of perspective. */
+  orthographic?: boolean;
+  /** Half-height in world units for orthographic projection (default = distance × tan(fov/2)). */
+  orthoScale?: number;
+}
+
+/** Named camera view presets. */
+export type CameraPreset = 'front' | 'back' | 'left' | 'right' | 'top';
+
+/** Snap camera angles to a named preset. Does not change distance or target. */
+export function applyCameraPreset(cam: OrbitCamera, preset: CameraPreset): void {
+  cam.roll = 0;
+  switch (preset) {
+    case 'front': cam.theta = 0;              cam.phi = 0;              break;
+    case 'back':  cam.theta = Math.PI;        cam.phi = 0;              break;
+    case 'left':  cam.theta = -Math.PI / 2;  cam.phi = 0;              break;
+    case 'right': cam.theta = Math.PI / 2;   cam.phi = 0;              break;
+    case 'top':   cam.theta = 0;             cam.phi = Math.PI / 2 - 1e-5; break;
+  }
 }
 
 
@@ -94,7 +113,13 @@ export function updateCamera(cam: OrbitCamera): void {
     view[6] = -s * r2 + c * u2;
   }
   const aspect = Number.isFinite(cam.aspect) && cam.aspect > 0 ? cam.aspect : 1;
-  const projMat = projectionMatrix(aspect, cam.fov, cam.near, cam.far);
+  let projMat: Float32Array;
+  if (cam.orthographic) {
+    const halfH = cam.orthoScale ?? cam.distance * Math.tan(cam.fov / 2);
+    projMat = orthographicMatrix(aspect, halfH, cam.near, cam.far);
+  } else {
+    projMat = projectionMatrix(aspect, cam.fov, cam.near, cam.far);
+  }
   cam.proj.set(projMat);
   const vp = viewProjFrom(view, projMat);
   cam.viewProj.set(vp);
@@ -173,6 +198,21 @@ function projectionMatrix(aspect: number, fov: number, near: number, far: number
   m[11] = far * near * nf;
   m[14] = -1;                 // w_clip = -z_eye
   m[15] = 0;
+  return m;
+}
+
+/**
+ * Orthographic projection for WebGPU (NDC z ∈ [0,1], Y-down).
+ * halfH = half-height in view space; halfW = halfH * aspect.
+ */
+function orthographicMatrix(aspect: number, halfH: number, near: number, far: number): Float32Array {
+  const m = new Float32Array(16);
+  const halfW = halfH * aspect;
+  m[0]  =  1 / halfW;
+  m[5]  = -1 / halfH; // negate: WebGPU NDC Y-down
+  m[10] =  1 / (near - far);
+  m[11] =  near / (near - far);
+  m[15] =  1;
   return m;
 }
 
